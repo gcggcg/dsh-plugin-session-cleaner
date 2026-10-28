@@ -1,0 +1,6 @@
+# Development patch for the session-cleaner bundle. Applied on top of the
+# web-app layer; the package name is the npm name so `dsh plugin add link:...`
+# and the published package share one id.
+- insert:
+    - id: session-cleaner
+      name: dsh-plugin-session-cleaner

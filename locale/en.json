@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Cleaner",
+    "description": "Delete sessions from the sidebar session menu and toggle archived-session visibility per workspace from the workspace menu."
+  }
+}

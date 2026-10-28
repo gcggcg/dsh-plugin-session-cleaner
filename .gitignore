@@ -1,0 +1,5 @@
+node_modules/
+.tmp-test/
+publish/dist/
+*.log
+.DS_Store
