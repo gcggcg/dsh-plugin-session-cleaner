@@ -185,6 +185,82 @@ export function createLiveStore(liveIds = []) {
 }
 
 /**
+ * One fake Agent with the shipped `status` getter and `cancel(cause, options)`
+ * signature. `onCancel` lets a test simulate the turn settling.
+ * @param {{ status?: string, onCancel?: (agent: object) => void }} [options]
+ * @returns fake agent recording its cancellation calls.
+ */
+export function createFakeAgent({ status = 'running', onCancel } = {}) {
+  return {
+    status,
+    cancelCalls: [],
+    abortCalls: 0,
+    interruptCalls: 0,
+    cancel(cause, options) {
+      this.cancelCalls.push({ cause, options });
+      if (typeof onCancel === 'function') onCancel(this);
+    },
+    abort() {
+      this.abortCalls += 1;
+      if (typeof onCancel === 'function') onCancel(this);
+    },
+    interrupt() {
+      this.interruptCalls += 1;
+      if (typeof onCancel === 'function') onCancel(this);
+    },
+  };
+}
+
+/**
+ * Fake `agents` registry: `agents.get(id)` returns the scripted Agent or
+ * `undefined`; an unlisted id is absent.
+ * @param {Map<string, object>} agents - id → Agent.
+ * @returns fake agent service.
+ */
+export function createFakeAgentStore(agents = new Map()) {
+  return {
+    agents,
+    get(id) {
+      return agents.get(id);
+    },
+  };
+}
+
+/**
+ * Create an isolated DSH-home-like layout: `<home>/sessions` plus
+ * `<home>/storages` carrying the marker the cleaner uses to recognize it.
+ * @returns {Promise<{ home: string, sessionsRoot: string, storagesRoot: string }>}
+ */
+export async function createTempHome(t) {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-session-cleaner-home-'));
+  if (typeof t?.after === 'function') t.after(() => rm(home, { recursive: true, force: true }));
+  const sessionsRoot = join(home, 'sessions');
+  const storagesRoot = join(home, 'storages');
+  await mkdir(sessionsRoot, { recursive: true });
+  await mkdir(join(storagesRoot, 'session_projcache', 'sessions'), { recursive: true });
+  await writeFile(join(storagesRoot, 'workspace.json'), '{}\n');
+  return { home, sessionsRoot, storagesRoot };
+}
+
+/** Write one projection-cache record; returns its path. */
+export async function writeProjectionCache(storagesRoot, sessionId, contents = '{"record":{}}\n') {
+  const directory = join(storagesRoot, 'session_projcache', 'sessions');
+  await mkdir(directory, { recursive: true });
+  const file = join(directory, `${sessionId}.json`);
+  await writeFile(file, contents);
+  return file;
+}
+
+/** Write one derived SQLite search index plus both WAL sidecars; returns its path. */
+export async function writeSearchIndex(storagesRoot, name = 'session_search.db') {
+  const file = join(storagesRoot, name);
+  await writeFile(file, 'sqlite-index-fixture');
+  await writeFile(`${file}-wal`, 'wal');
+  await writeFile(`${file}-shm`, 'shm');
+  return file;
+}
+
+/**
  * Start a real loopback HTTP server that serves one route handler, so tests
  * assert actual status lines, headers, and bodies instead of a mock response.
  * @returns {Promise<{ origin: string, server: import('node:http').Server }>}

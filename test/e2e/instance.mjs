@@ -6,14 +6,20 @@
  * authenticated `?token=` URL, and is always torn down by process tree.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { cp, mkdir, readFile, rm, writeFile, access } from 'node:fs/promises';
+import { cp, mkdir, readFile, readdir, rm, writeFile, access } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { CLI, ELECTRON, HOME, PLUGIN_ROOT, PORT, PROFILE, PROFILE_DIR, SEED } from './config.mjs';
 
 const PID_FILE = join(HOME, 'e2e-instance.pid');
 const LOG_FILE = join(HOME, 'e2e-instance.log');
+const FIXTURES_FILE = join(HOME, 'e2e-archived-fixtures.json');
+/** Read-only source of the local account files that keep the isolated GUI signed in. */
+const CREDENTIALS_SOURCE = process.env.DSH_E2E_CREDENTIALS_SOURCE ?? join(homedir(), '.dsh');
+/** Account files copied into the isolated home (never modified at the source). */
+const CREDENTIAL_FILES = ['.credentials.yaml', '.anonymous-user-id'];
 
 /** Minimal web profile definition used when the isolated home has none yet. */
 const PROFILE_FILES = {
@@ -72,6 +78,14 @@ export async function ensureProfile() {
 
 /**
  * Restore sessions + workspace bookkeeping from the seed snapshot.
+ *
+ * The seed's own `archivedSessionIds` may reference sessions without local logs
+ * (ghosts that never render), so a deterministic archived-visibility fixture is
+ * seeded too: for each workspace, the first session that (a) is listed in that
+ * workspace, (b) has a log directory in the seed, and (c) is not pinned, is
+ * marked archived. Those ids are written to `e2e-archived-fixtures.json` for
+ * the suite to assert against.
+ *
  * @returns {Promise<boolean>} whether a seed snapshot was available.
  */
 export async function resetHome() {
@@ -85,7 +99,66 @@ export async function resetHome() {
     await rm(join(HOME, 'storages', name), { recursive: true, force: true });
     await cp(source, join(HOME, 'storages', name), { recursive: true });
   }
+  const fixtures = await seedArchivedFixtures();
+  await writeFile(FIXTURES_FILE, JSON.stringify({ fixtures }, null, 2) + '\n');
+  await seedCredentials();
   return true;
+}
+
+/**
+ * Copy the local account files into the isolated home so opening a session does
+ * not raise the account/onboarding modal mid-suite (the source files are only
+ * read, never modified).
+ */
+async function seedCredentials() {
+  for (const name of CREDENTIAL_FILES) {
+    const source = join(CREDENTIALS_SOURCE, name);
+    if (!existsSync(source)) continue;
+    await cp(source, join(HOME, name));
+  }
+}
+
+/**
+ * Mark one log-backed session per workspace as archived in the isolated home.
+ * @returns {Promise<Array<{ id: string, workspaceKey: string }>>} the fixture rows.
+ */
+async function seedArchivedFixtures() {
+  const workspaceFile = join(HOME, 'storages', 'workspace.json');
+  if (!existsSync(workspaceFile)) return [];
+  const json = JSON.parse(await readFile(workspaceFile, 'utf8'));
+  const archived = new Set(json.global.archivedSessionIds ?? []);
+  const pinned = new Set(json.global.pinnedSessionIds ?? []);
+  const sessionsRoot = join(HOME, 'sessions');
+  const onDisk = new Set();
+  if (existsSync(sessionsRoot)) {
+    for (const project of await readdir(sessionsRoot)) {
+      for (const entry of await readdir(join(sessionsRoot, project))) onDisk.add(entry);
+    }
+  }
+  const fixtures = [];
+  for (const [workspaceId, workspace] of Object.entries(json.tables.workspaces ?? {})) {
+    for (const sessionId of workspace.sessionIds ?? []) {
+      if (archived.has(sessionId) || pinned.has(sessionId) || !onDisk.has(sessionId)) continue;
+      archived.add(sessionId);
+      fixtures.push({ id: sessionId, workspaceKey: `workspace:${workspaceId}` });
+      break;
+    }
+  }
+  json.global.archivedSessionIds = [...archived];
+  await writeFile(workspaceFile, JSON.stringify(json, null, 2) + '\n');
+  return fixtures;
+}
+
+/**
+ * The archived fixtures seeded by the last {@link resetHome}.
+ * @returns {Promise<Array<{ id: string, workspaceKey: string }>>} fixture rows.
+ */
+export async function archivedFixtures() {
+  try {
+    return JSON.parse(await readFile(FIXTURES_FILE, 'utf8')).fixtures ?? [];
+  } catch {
+    return [];
+  }
 }
 
 /**

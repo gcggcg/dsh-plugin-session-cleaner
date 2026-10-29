@@ -44,8 +44,8 @@ window.__ModuleLoader__.load({
       'delete.failed': '删除失败：{message}',
       'error.invalid': '会话 ID 无效，无法删除。',
       'error.notFound': '会话不存在或已被删除。',
-      'error.live': '该会话已被 DSH 打开并在内存中保留，需要重启 DSH 后才能永久删除。请重启 DSH，再从侧栏删除。',
-      'error.active': '会话仍有进行中的工作。请先停止这些工作后重试。',
+      'error.live': '该会话当前无法删除，请稍后重试或重启 DSH。',
+      'error.active': '该会话仍在运行：宿主已尝试停止，但未能在限定时间内停止，未删除任何内容。请先停止该会话的工作后重试。',
       'error.workspace': '无法从工作区移除该会话，删除已中止。',
       'error.failed': '删除会话失败：{message}',
     };
@@ -66,11 +66,19 @@ window.__ModuleLoader__.load({
       'delete.failed': 'Delete failed: {message}',
       'error.invalid': 'The session id is invalid, so it cannot be deleted.',
       'error.notFound': 'The session does not exist or was already deleted.',
-      'error.live': 'This session is still held in memory because DSH has opened it. Restart DSH, then delete it from the sidebar.',
-      'error.active': 'This session still has running work. Stop that work and retry.',
+      'error.live': 'This session cannot be deleted right now; retry later or restart DSH.',
+      'error.active': 'This session is still running: the host tried to stop it but it did not stop in time, so nothing was deleted. Stop its work and retry.',
       'error.workspace': 'The session could not be detached from its workspace; deletion was aborted.',
       'error.failed': 'Deleting the session failed: {message}',
     };
+
+    const STORAGE_KEY = 'dsh.session-cleaner.workspace-archived';
+    /** Plugin-owned row marker: this archived session row must stay hidden. */
+    const HIDDEN_ATTR = 'data-session-cleaner-archived-hidden';
+    /** Plugin-owned row marker: this archived session row belongs to an enabled workspace. */
+    const SHOWN_ATTR = 'data-session-cleaner-archived-shown';
+    /** Plugin-owned root marker selecting the archived-row flash guard. */
+    const GUARD_ATTR = 'data-session-cleaner-archived-guard';
 
     /** Plugin-local stylesheet; only the surfaces the primitives do not style. */
     const CSS = [
@@ -78,10 +86,15 @@ window.__ModuleLoader__.load({
       '.spc-dialog-error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px;margin-top:8px;white-space:pre-wrap}',
       '.spc-dialog-warning{color:var(--dsw-alias-state-warning-primary,var(--dsw-alias-label-primary));font-size:12px;line-height:18px;margin-top:8px}',
       '.spc-dialog-status{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}',
+      // Archived-session hiding: a plugin-owned attribute plus `!important`
+      // CSS, so a React re-render (which only reconciles props it owns) can
+      // never wipe it the way an inline `style.display` could.
+      `[${HIDDEN_ATTR}]{display:none !important}`,
+      // Flash guard: an archived row is hidden from the moment it renders until
+      // the controller has classified it (new rows never appear before tagging).
+      `html[${GUARD_ATTR}="all"] [data-row-key^="session:"][aria-description]{display:none !important}`,
+      `html[${GUARD_ATTR}="filtered"] [data-row-key^="session:"][aria-description]:not([${SHOWN_ATTR}]){display:none !important}`,
     ].join('');
-
-    const STORAGE_KEY = 'dsh.session-cleaner.workspace-archived';
-    const LOCAL_STORAGE_ATTR = 'data-session-cleaner-hidden';
 
     // ────────────────────────────── tiny store ──────────────────────────────
 
@@ -372,6 +385,15 @@ window.__ModuleLoader__.load({
      * archived filter itself is driven through the live WorkspaceBrowser store
      * actions found on the React fiber; a menu-click fallback covers builds
      * where the fiber walk fails.
+     *
+     * Archived visibility is plugin-owned and deterministic: while at least one
+     * workspace toggle is on, the built-in filter is driven to `show` (so the
+     * archived rows can render) and only the enabled workspaces' archived rows
+     * stay visible; with every toggle off, the built-in filter is driven to
+     * `default` and every archived row is hidden. Hiding is expressed as a
+     * plugin-owned row attribute plus an injected CSS rule, never an inline
+     * style, so a React re-render or an attribute update cannot resurrect a
+     * hidden row.
      * @param ctx - client root context.
      * @returns disposer removing every listener/observer it installed.
      */
@@ -405,7 +427,7 @@ window.__ModuleLoader__.load({
       const workspaceActionSuffix =
         workspaceActionPrefix === undefined ? undefined : workspaceActionTemplate.slice(workspaceActionTemplate.indexOf('{name}') + '{name}'.length);
 
-      /** Persisted toggles plus the filter to restore once the last toggle turns off. */
+      /** Persisted per-workspace toggles; an older `restoreFilter` field is ignored. */
       let state = loadState();
       /** Menu trigger click observed just before the owned menu opens. */
       let pendingMenu = null;
@@ -414,21 +436,27 @@ window.__ModuleLoader__.load({
       let scheduled = false;
       let disposed = false;
       let bootstrapped = false;
+      /** Built-in filter value last requested by this controller (null before the first drive). */
+      let drivenFilter = null;
+      let lastDriveAt = 0;
+      /** Re-assert budget for the current (target filter, render state) episode. */
+      let driftEpisode = '';
+      let driftAttempts = 0;
+      let guardMode = null;
 
       function loadState() {
         try {
           const raw = window.localStorage.getItem(STORAGE_KEY);
-          if (raw === null || raw === '') return { enabled: {}, restoreFilter: null };
+          if (raw === null || raw === '') return { enabled: {} };
           const parsed = JSON.parse(raw);
-          if (parsed === null || typeof parsed !== 'object') return { enabled: {}, restoreFilter: null };
+          if (parsed === null || typeof parsed !== 'object') return { enabled: {} };
           const enabled = {};
           if (parsed.enabled !== null && typeof parsed.enabled === 'object') {
             for (const [key, value] of Object.entries(parsed.enabled)) if (value === true) enabled[key] = true;
           }
-          const restoreFilter = parsed.restoreFilter === 'show' || parsed.restoreFilter === 'only' || parsed.restoreFilter === 'default' ? parsed.restoreFilter : null;
-          return { enabled, restoreFilter };
+          return { enabled };
         } catch {
-          return { enabled: {}, restoreFilter: null };
+          return { enabled: {} };
         }
       }
 
@@ -445,21 +473,82 @@ window.__ModuleLoader__.load({
       }
 
       function isEnabled(workspaceId) {
-        return state.enabled[workspaceId] === true;
+        return workspaceId !== '' && state.enabled[workspaceId] === true;
       }
 
       /**
-       * Best-effort current filter read from what is on screen. Archived rows
-       * are the only session rows carrying `aria-description`.
-       * @returns `default`, `show`, or `only`.
+       * Read the sidebar registry snapshot: the archived Session ids and each
+       * Session's Workspace. The data is only used to complement the DOM
+       * signal, so an absent service degrades to the DOM-only path.
+       * @returns archived id set plus Session-id -> Workspace-id map.
        */
-      function detectFilter() {
-        const rows = Array.from(document.querySelectorAll('[data-row-key^="session:"]'));
-        if (rows.length === 0) return 'default';
-        const archived = rows.filter((row) => row.hasAttribute('aria-description')).length;
-        if (archived === 0) return 'default';
-        if (archived === rows.length) return 'only';
-        return 'show';
+      function readRegistry() {
+        const bySession = new Map();
+        const archived = new Set();
+        try {
+          const workspaces = ctx.get('workspaces');
+          const snapshot = workspaces === undefined || workspaces === null ? undefined : workspaces.list.getSnapshot();
+          if (snapshot !== null && typeof snapshot === 'object') {
+            const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+            for (const item of items) {
+              if (item === null || typeof item !== 'object' || !Array.isArray(item.sessionIds)) continue;
+              for (const sessionId of item.sessionIds) bySession.set(sessionId, item.workspaceId);
+            }
+            const archivedIds = Array.isArray(snapshot.archivedSessionIds) ? snapshot.archivedSessionIds : [];
+            for (const sessionId of archivedIds) archived.add(sessionId);
+          }
+        } catch {
+          /* optional service: the DOM signal still classifies every rendered row */
+        }
+        return { bySession, archived };
+      }
+
+      /**
+       * @param row - rendered session row.
+       * @returns the stored Session id, or '' when the row has no key.
+       */
+      function rowSessionId(row) {
+        const key = row.getAttribute('data-row-key');
+        return key === null ? '' : key.slice('session:'.length);
+      }
+
+      /**
+       * @param row - rendered session row.
+       * @param registry - sidebar registry snapshot.
+       * @returns true when the row shows an archived session.
+       */
+      function rowArchived(row, registry) {
+        if (registry.archived.has(rowSessionId(row))) return true;
+        return row.hasAttribute('aria-description') || hasClassSuffix(row, '_archived');
+      }
+
+      /**
+       * Map one session row to its workspace. The grouping section is the
+       * primary contract; the registry map covers the flat list (no sections).
+       * @param row - rendered session row.
+       * @param registry - sidebar registry snapshot.
+       * @returns workspace id, or '' for the ungrouped bucket.
+       */
+      function rowWorkspaceId(row, registry) {
+        const section = row.closest('[style*="--dsh-workspace-indent"]');
+        if (section !== null) {
+          const workspaceRow = section.querySelector('[data-row-key^="workspace:"]');
+          const key = workspaceRow === null ? null : workspaceRow.getAttribute('data-row-key');
+          if (key !== null) return key.slice('workspace:'.length);
+        }
+        return registry.bySession.get(rowSessionId(row)) ?? '';
+      }
+
+      /** @returns the built-in archived filter the plugin requires right now. */
+      function desiredFilter() {
+        return enabledIds().length > 0 ? 'show' : 'default';
+      }
+
+      /** @returns every rendered archived session row, hidden ones included. */
+      function renderedArchivedRows() {
+        return Array.from(document.querySelectorAll('[data-row-key^="session:"]')).filter(
+          (row) => row.hasAttribute('aria-description') || hasClassSuffix(row, '_archived'),
+        );
       }
 
       /**
@@ -480,15 +569,16 @@ window.__ModuleLoader__.load({
 
       /**
        * Fallback for builds where the fiber walk fails: open the sidebar view
-       * options menu, activate the matching archived-filter row, and close it.
+       * options menu, activate the matching archived-filter row, and let the
+       * menu close.
        * @param filter - target filter value.
-       * @returns promise resolving after the click attempt.
+       * @returns promise resolving true when a menu row was activated.
        */
       async function applyFilterViaMenu(filter) {
         const trigger = Array.from(document.querySelectorAll('button[aria-label]')).find(
           (button) => button.getAttribute('aria-label') === viewOptionsLabel,
         );
-        if (trigger === undefined) return;
+        if (trigger === undefined) return false;
         trigger.click();
         const target =
           filter === 'show' ? showArchivedLabel : filter === 'only' ? onlyArchivedLabel : hideArchivedLabel;
@@ -502,81 +592,127 @@ window.__ModuleLoader__.load({
             );
             if (item !== undefined) {
               item.click();
-              return;
+              return true;
             }
           }
         }
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        return false;
       }
 
       /**
-       * Drive the built-in filter to `show`, remembering the previous value so
-       * the last toggle can restore it.
-       * @param next - filter the caller wants.
+       * Ask the built-in view for `filter`. Interval-guarded so a drive that
+       * cannot take effect cannot spin against React renders.
+       * @param filter - target filter value.
        */
-      function setFilter(next) {
-        if (applyFilter(next)) return;
-        void applyFilterViaMenu(next);
-      }
-
-      /**
-       * Map one session row to the workspace key of the group section that owns
-       * it. Rows in the flat list (no section) map to the empty key.
-       * @param row - session row element.
-       * @returns workspace id or `''`.
-       */
-      function workspaceIdOf(row) {
-        const section = row.closest('[style*="--dsh-workspace-indent"]');
-        if (section === null) return '';
-        const workspaceRow = section.querySelector('[data-row-key^="workspace:"]');
-        if (workspaceRow === null) return '';
-        const key = workspaceRow.getAttribute('data-row-key');
-        return key === null ? '' : key.slice('workspace:'.length);
-      }
-
-      /** Hide archived rows of workspaces whose toggle is off, restore the rest. */
-      function applyHiding() {
-        const enabled = enabledIds();
-        const rows = Array.from(document.querySelectorAll('[data-row-key^="session:"]'));
-        if (enabled.length === 0) {
-          // The plugin owns no archived visibility while every toggle is off;
-          // a manual "show archived" choice in the built-in view options must
-          // stay untouched.
-          for (const row of rows) {
-            if (!row.hasAttribute(LOCAL_STORAGE_ATTR)) continue;
-            row.removeAttribute(LOCAL_STORAGE_ATTR);
-            if (row.style.display === 'none') row.style.display = '';
-          }
+      function driveFilter(filter) {
+        const now = Date.now();
+        if (now - lastDriveAt < 150) return;
+        lastDriveAt = now;
+        if (applyFilter(filter)) {
+          drivenFilter = filter;
           return;
         }
-        const grouped = document.querySelector('[data-row-key^="workspace:"]') !== null;
-        for (const row of rows) {
-          if (!row.hasAttribute('aria-description') || !grouped) {
-            if (row.hasAttribute(LOCAL_STORAGE_ATTR)) {
-              row.removeAttribute(LOCAL_STORAGE_ATTR);
-              if (row.style.display === 'none') row.style.display = '';
-            }
+        void applyFilterViaMenu(filter).then((ok) => {
+          if (!ok || disposed) return;
+          drivenFilter = filter;
+          schedule();
+        });
+      }
+
+      /**
+       * Keep the built-in filter at the plugin's target. A manual view-option
+       * pick (or a store re-render) that moves it away is re-asserted a bounded
+       * number of times; the CSS guard keeps hiding archived rows meanwhile.
+       */
+      function reconcileFilter() {
+        const desired = desiredFilter();
+        const rendered = renderedArchivedRows();
+        if (drivenFilter !== desired) {
+          driveFilter(desired);
+          return;
+        }
+        const episode = `${desired}|${rendered.length}|${enabledIds().length}`;
+        if (episode !== driftEpisode) {
+          driftEpisode = episode;
+          driftAttempts = 0;
+        }
+        if (driftAttempts >= 3) return;
+        let drift = false;
+        if (desired === 'default') {
+          drift = rendered.length > 0;
+        } else if (rendered.length === 0) {
+          const registry = readRegistry();
+          let expected = 0;
+          for (const sessionId of registry.archived) if (isEnabled(registry.bySession.get(sessionId) ?? '')) expected += 1;
+          drift = expected > 0;
+        }
+        if (!drift) return;
+        driftAttempts += 1;
+        driveFilter(desired);
+      }
+
+      /**
+       * Tag one archived row for the plugin-owned CSS. The attribute survives
+       * React re-renders because React only reconciles the props it owns.
+       * @param row - archived session row.
+       * @param show - whether this row must stay visible.
+       */
+      function tagArchivedRow(row, show) {
+        if (show) {
+          if (row.hasAttribute(HIDDEN_ATTR)) row.removeAttribute(HIDDEN_ATTR);
+          if (!row.hasAttribute(SHOWN_ATTR)) row.setAttribute(SHOWN_ATTR, '');
+          return;
+        }
+        if (row.hasAttribute(SHOWN_ATTR)) row.removeAttribute(SHOWN_ATTR);
+        if (!row.hasAttribute(HIDDEN_ATTR)) row.setAttribute(HIDDEN_ATTR, '');
+      }
+
+      /**
+       * Drop the plugin markers from a row that is no longer archived.
+       * @param row - ordinary session row.
+       */
+      function untagRow(row) {
+        if (row.hasAttribute(HIDDEN_ATTR)) row.removeAttribute(HIDDEN_ATTR);
+        if (row.hasAttribute(SHOWN_ATTR)) row.removeAttribute(SHOWN_ATTR);
+      }
+
+      /**
+       * Root-level guard that hides archived rows before the per-row tagging
+       * lands (new rows render hidden instead of flashing visible).
+       * @param mode - `all` (every toggle off), `filtered` (some toggle on), or null to clear.
+       */
+      function setGuard(mode) {
+        if (guardMode === mode) return;
+        guardMode = mode;
+        const root = document.documentElement;
+        if (root === null) return;
+        if (mode === null) root.removeAttribute(GUARD_ATTR);
+        else root.setAttribute(GUARD_ATTR, mode);
+      }
+
+      /**
+       * Recompute archived-row visibility from the enabled set. Every call is a
+       * full recomputation, so virtualized/re-rendered rows converge to the
+       * same state.
+       */
+      function applyHiding() {
+        const allOff = enabledIds().length === 0;
+        setGuard(allOff ? 'all' : 'filtered');
+        const registry = readRegistry();
+        for (const row of document.querySelectorAll('[data-row-key^="session:"]')) {
+          if (!rowArchived(row, registry)) {
+            untagRow(row);
             continue;
           }
-          const show = enabled.length > 0 && isEnabled(workspaceIdOf(row));
-          if (show) {
-            if (row.hasAttribute(LOCAL_STORAGE_ATTR)) {
-              row.removeAttribute(LOCAL_STORAGE_ATTR);
-              if (row.style.display === 'none') row.style.display = '';
-            }
-          } else if (row.style.display !== 'none') {
-            row.setAttribute(LOCAL_STORAGE_ATTR, '');
-            row.style.display = 'none';
-          }
+          tagArchivedRow(row, !allOff && isEnabled(rowWorkspaceId(row, registry)));
         }
       }
 
-      /** Restore every row this controller hid (plugin unload). */
+      /** Restore every row this controller touched (plugin unload). */
       function clearHiding() {
-        for (const row of document.querySelectorAll(`[${LOCAL_STORAGE_ATTR}]`)) {
-          row.removeAttribute(LOCAL_STORAGE_ATTR);
-          row.style.display = '';
-        }
+        setGuard(null);
+        for (const row of document.querySelectorAll(`[${HIDDEN_ATTR}], [${SHOWN_ATTR}]`)) untagRow(row);
       }
 
       /** @returns whether the sidebar has rendered any session rows yet. */
@@ -585,16 +721,18 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Reconcile the rendered archived rows after any relevant DOM change.
+       * Reconcile the built-in filter and the rendered archived rows after any
+       * relevant DOM change.
        */
       function tick() {
         if (disposed) return;
         cleanupDecorations();
         decoratePendingMenu();
-        if (!bootstrapped && sidebarReady()) {
+        if (!bootstrapped) {
+          if (!sidebarReady()) return;
           bootstrapped = true;
-          if (enabledIds().length > 0) setFilter('show');
         }
+        reconcileFilter();
         applyHiding();
       }
 
@@ -718,23 +856,19 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Toggle one workspace and reconcile the built-in archived filter.
+       * Toggle one workspace. The built-in filter target and the row tagging are
+       * derived from the enabled set on the next tick, so on/off is symmetric
+       * and cannot inherit a previously detected filter.
        * @param workspaceId - toggled workspace.
        * @param next - whether archived sessions should show there.
        */
       function setWorkspaceEnabled(workspaceId, next) {
         if (next) state.enabled[workspaceId] = true;
         else delete state.enabled[workspaceId];
-        if (enabledIds().length > 0) {
-          if (state.restoreFilter === null) state.restoreFilter = detectFilter();
-          saveState();
-          setFilter('show');
-        } else {
-          const restore = state.restoreFilter === null ? 'default' : state.restoreFilter;
-          state.restoreFilter = null;
-          saveState();
-          setFilter(restore);
-        }
+        saveState();
+        drivenFilter = null;
+        driftEpisode = '';
+        driftAttempts = 0;
         schedule();
       }
 
@@ -754,6 +888,15 @@ window.__ModuleLoader__.load({
 
       const observer = new MutationObserver((records) => {
         for (const record of records) {
+          if (record.type === 'attributes') {
+            const target = record.target;
+            if (!(target instanceof Element)) continue;
+            if (target.matches('[data-row-key]') || target.closest('[data-row-key]') !== null) {
+              schedule();
+              return;
+            }
+            continue;
+          }
           for (const node of record.addedNodes) {
             if (isRelevantNode(node)) {
               schedule();
@@ -768,7 +911,15 @@ window.__ModuleLoader__.load({
           }
         }
       });
-      observer.observe(document.body, { childList: true, subtree: true });
+      // `class`/`style` are watched because a re-render can rewrite a row's
+      // attributes; the plugin's own row/root attributes are never in the
+      // filter, so tagging cannot retrigger itself.
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['style', 'class', 'aria-description', 'data-row-key'],
+      });
       schedule();
 
       return () => {
