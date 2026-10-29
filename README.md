@@ -33,9 +33,13 @@ Desktop 的 profile 由 Electron 应用独占管理，`dsh plugin --profile desk
 
 ```bash
 # Desktop（发布版）：在应用内「插件」页安装 dsh-plugin-session-cleaner
-# Desktop（本地开发）：退出应用后，在 %USERPROFILE%\.dsh\profiles\desktop\package.json 的
+# Desktop（本地开发）：退出应用后，在 <DSH_HOME>\profiles\desktop\package.json 的
 #   dependencies 加 "dsh-plugin-session-cleaner": "link:<本仓库绝对路径>"，
-#   并把它追加到 dsh.profile.bundles；重新打开应用。
+#   并把它追加到 dsh.profile.bundles；然后在 profile 目录用应用自带的 pnpm 执行
+#   `pnpm install`（或直接使用「插件」页的安装功能），重新打开应用。
+#   注意：<DSH_HOME> 默认是 %USERPROFILE%\.dsh；如果应用设置了 DSH_HOME
+#   环境变量（部分安装/测试环境会用一个独立的数据目录），插件必须装到
+#   **该目录**下的 profiles\desktop，否则重启后不会出现。
 
 # Web / TUI profile（CLI 管理）
 dsh plugin --profile web add dsh-plugin-session-cleaner
