@@ -14,6 +14,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+/** Published package name; the bundle patch and the client module id must match it. */
+export const PLUGIN_PACKAGE = '@estelle-ge/dsh-plugin-session-cleaner';
 export const TEMP_ROOT = process.env.DSH_E2E_TEMP ?? join(PLUGIN_ROOT, '.tmp-test');
 export const HOME = process.env.DSH_E2E_HOME ?? join(TEMP_ROOT, 'home');
 export const SEED = process.env.DSH_E2E_SEED ?? join(TEMP_ROOT, 'seed');

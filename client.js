@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: 'dsh-plugin-session-cleaner',
+  id: '@estelle-ge/dsh-plugin-session-cleaner',
   factory(require) {
     const React = require('react');
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives');

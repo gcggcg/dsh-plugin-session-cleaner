@@ -1,6 +1,7 @@
 # Development patch for the session-cleaner bundle. Applied on top of the
 # web-app layer; the package name is the npm name so `dsh plugin add link:...`
-# and the published package share one id.
+# and the published package share one id. Quote scoped names: a bare `@` starts
+# a YAML indicator and would make this overlay unparsable.
 - insert:
     - id: session-cleaner
-      name: dsh-plugin-session-cleaner
+      name: "@estelle-ge/dsh-plugin-session-cleaner"

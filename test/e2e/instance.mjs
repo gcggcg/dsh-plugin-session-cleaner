@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { CLI, ELECTRON, HOME, PLUGIN_ROOT, PORT, PROFILE, PROFILE_DIR, SEED } from './config.mjs';
+import { CLI, ELECTRON, HOME, PLUGIN_PACKAGE, PLUGIN_ROOT, PORT, PROFILE, PROFILE_DIR, SEED } from './config.mjs';
 
 const PID_FILE = join(HOME, 'e2e-instance.pid');
 const LOG_FILE = join(HOME, 'e2e-instance.log');
@@ -53,20 +53,25 @@ export async function ensureProfile() {
   manifest.name = `dsh-profile-${PROFILE}`;
   manifest.private = true;
   manifest.dependencies ??= {};
-  manifest.dependencies['dsh-plugin-session-cleaner'] = `link:${PLUGIN_ROOT}`;
+  // Older isolated homes may still carry the pre-scope link; drop it so the
+  // loader never sees two rows for the same bundle.
+  delete manifest.dependencies['dsh-plugin-session-cleaner'];
+  manifest.dependencies[PLUGIN_PACKAGE] = `link:${PLUGIN_ROOT}`;
   manifest.dsh ??= {};
   manifest.dsh.profile ??= {};
   const bundles = Array.isArray(manifest.dsh.profile.bundles) ? manifest.dsh.profile.bundles : [];
   for (const required of ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']) if (!bundles.includes(required)) bundles.push(required);
-  if (!bundles.includes('dsh-plugin-session-cleaner')) bundles.push('dsh-plugin-session-cleaner');
-  manifest.dsh.profile.bundles = bundles;
+  const keptBundles = bundles.filter((entry) => entry !== 'dsh-plugin-session-cleaner');
+  if (!keptBundles.includes(PLUGIN_PACKAGE)) keptBundles.push(PLUGIN_PACKAGE);
+  manifest.dsh.profile.bundles = keptBundles;
   await writeFile(packagePath, JSON.stringify(manifest, null, 2) + '\n');
 
   const nodeModules = join(PROFILE_DIR, 'node_modules');
   await mkdir(nodeModules, { recursive: true });
-  const link = join(nodeModules, 'dsh-plugin-session-cleaner');
+  const link = join(nodeModules, ...PLUGIN_PACKAGE.split('/'));
   if (!existsSync(link)) {
     const { symlink } = await import('node:fs/promises');
+    await mkdir(join(link, '..'), { recursive: true });
     try {
       await symlink(PLUGIN_ROOT, link, 'junction');
     } catch (error) {

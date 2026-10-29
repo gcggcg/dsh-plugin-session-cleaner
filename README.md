@@ -1,5 +1,8 @@
 # 会话清理 · Session Cleaner
 
+[![开放插件市场](https://img.shields.io/endpoint?url=https%3A%2F%2Fdshopen.org%2Fbadge%2F%40estelle-ge%2Fdsh-plugin-session-cleaner.json)](https://dshopen.org/zh/plugins/@estelle-ge/dsh-plugin-session-cleaner/)
+[![npm](https://img.shields.io/npm/v/@estelle-ge/dsh-plugin-session-cleaner.svg)](https://www.npmjs.com/package/@estelle-ge/dsh-plugin-session-cleaner)
+
 DeepSeek Harness Web 侧栏的会话清理插件：在会话行 `...` 菜单中**永久删除会话**，并在工作区文件夹 `...` 菜单中按工作区**显示 / 隐藏已归档会话**。
 
 A DeepSeek Harness Web sidebar plugin: **permanently delete a session** from its row `...` menu, and **show / hide archived sessions per workspace** from the workspace folder `...` menu.
@@ -30,24 +33,23 @@ A DeepSeek Harness Web sidebar plugin: **permanently delete a session** from its
 ## 安装
 
 **远程安装（推荐，其他人也适用）**：DeepSeek Harness Desktop →「插件」页 →「添加插件」，
-输入下面的 git 规格（安装器接受 `github:` 简写、仓库 URL 或 tarball 地址），确认后
-**完全退出并重启应用**：
+输入 npm 包名（或等价的 GitHub 仓库地址），确认后 **完全退出并重启应用**：
 
 ```text
+@estelle-ge/dsh-plugin-session-cleaner
+# 等价写法（从 GitHub 仓库安装同一个插件）
 github:gcggcg/dsh-plugin-session-cleaner
-# 或
-https://github.com/gcggcg/dsh-plugin-session-cleaner
 ```
 
-插件不需要构建步骤：安装器 clone 仓库后，Host 入口 `index.js` 与浏览器 bundle
-`client.js` 会被直接加载。
+插件不需要构建步骤：安装后 Host 入口 `index.js` 与浏览器 bundle `client.js` 会被直接加载。
+dshopen 市场收录后也可在 https://dshopen.org/zh/plugins/@estelle-ge/dsh-plugin-session-cleaner/ 查看。
 
 Desktop 的 profile 由 Electron 应用独占管理，`dsh plugin --profile desktop ...` 会被拒绝。
 其余安装方式按环境选择：
 
 ```bash
 # Desktop（本地开发）：退出应用后，在 <DSH_HOME>\profiles\desktop\package.json 的
-#   dependencies 加 "dsh-plugin-session-cleaner": "link:<本仓库绝对路径>"，
+#   dependencies 加 "@estelle-ge/dsh-plugin-session-cleaner": "link:<本仓库绝对路径>"，
 #   并把它追加到 dsh.profile.bundles；然后在 profile 目录用应用自带的 pnpm 执行
 #   `pnpm install`（或直接使用「插件」页的安装功能），重新打开应用。
 #   注意：<DSH_HOME> 默认是 %USERPROFILE%\.dsh；如果应用设置了 DSH_HOME
@@ -55,7 +57,7 @@ Desktop 的 profile 由 Electron 应用独占管理，`dsh plugin --profile desk
 #   **该目录**下的 profiles\desktop，否则重启后不会出现。
 
 # Web / TUI profile（CLI 管理）
-dsh plugin --profile web add github:gcggcg/dsh-plugin-session-cleaner
+dsh plugin --profile web add @estelle-ge/dsh-plugin-session-cleaner
 dsh plugin --profile web add link:<本仓库绝对路径>     # 本地开发
 ```
 

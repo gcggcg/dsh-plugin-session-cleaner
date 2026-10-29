@@ -25,7 +25,7 @@ import { cp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/pr
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { ELECTRON, PLUGIN_ROOT, SEED, TEMP_ROOT, playwright } from './config.mjs';
+import { ELECTRON, PLUGIN_PACKAGE, PLUGIN_ROOT, SEED, TEMP_ROOT, playwright } from './config.mjs';
 
 /** Isolated DSH home for the second Desktop instance. */
 export const DESKTOP_HOME = join(TEMP_ROOT, 'desktop-home');
@@ -90,7 +90,8 @@ export async function buildDesktopHome({ pluginRoot = PLUGIN_ROOT, keepUserData 
   manifest.name = 'dsh-profile-desktop';
   manifest.private = true;
   manifest.dependencies ??= {};
-  manifest.dependencies['dsh-plugin-session-cleaner'] = `link:${pluginRoot}`;
+  delete manifest.dependencies['dsh-plugin-session-cleaner'];
+  manifest.dependencies[PLUGIN_PACKAGE] = `link:${pluginRoot}`;
   await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
 
   await linkProfileModules({ pluginRoot });
@@ -117,25 +118,23 @@ async function linkProfileModules({ pluginRoot }) {
       await cp(from, to);
       continue;
     }
-    if (entry.name === '@deepseek-ai' || entry.name.startsWith('@')) {
+    if (entry.name.startsWith('@')) {
       // Scope directories are materialized so a nested link can be replaced.
       await mkdir(to, { recursive: true });
       for (const child of await readdir(from, { withFileTypes: true })) {
         const childFrom = join(from, child.name);
         const childTo = join(to, child.name);
-        if (child.isDirectory() || child.isSymbolicLink()) await symlink(childFrom, childTo, 'junction');
+        if (`${entry.name}/${child.name}` === PLUGIN_PACKAGE) await symlink(pluginRoot, childTo, 'junction');
+        else if (child.isDirectory() || child.isSymbolicLink()) await symlink(childFrom, childTo, 'junction');
         else await cp(childFrom, childTo);
       }
       continue;
     }
-    if (entry.name === 'dsh-plugin-session-cleaner') {
-      await symlink(pluginRoot, to, 'junction');
-      continue;
-    }
     await symlink(from, to, 'junction');
   }
-  // The plugin under test is always reachable by name.
-  const pluginLink = join(destination, 'dsh-plugin-session-cleaner');
+  // The plugin under test is always reachable by its published (scoped) name.
+  const pluginLink = join(destination, ...PLUGIN_PACKAGE.split('/'));
+  await mkdir(join(pluginLink, '..'), { recursive: true });
   if (!existsSync(pluginLink)) await symlink(pluginRoot, pluginLink, 'junction');
 }
 

@@ -3,6 +3,22 @@
 Status: working notes for the build. Not shipped in the npm package. Keep this file
 updated when a contract changes.
 
+## Package identity (contract)
+
+The published package is `@estelle-ge/dsh-plugin-session-cleaner` (GitHub repo:
+`gcggcg/dsh-plugin-session-cleaner`). Three places MUST carry the same string or the
+plugin silently fails to load:
+
+1. `package.json` → `name`;
+2. `cordis.patch.yml` → the `insert[].name` **quoted** (a bare `@` starts a YAML
+   indicator and makes the overlay unparsable);
+3. `client.js` → `window.__ModuleLoader__.load({ id: ... })` (the client module
+   registry is keyed by package name).
+
+Internal DOM markers (`data-plugin="dsh-plugin-session-cleaner"`, the CSS style key and
+the `localStorage` key) intentionally keep the short historical name; they are not
+package identity. The local desktop profiles link the checkout under the scoped name.
+
 ## Goal
 
 One DSH bundle plugin that adds two sidebar features to the DeepSeek Harness Web GUI:

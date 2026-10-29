@@ -38,7 +38,7 @@ const zhMeta = JSON.parse(await readFile(join(ROOT, 'locale/zh.json'), 'utf8'));
 const enMeta = JSON.parse(await readFile(join(ROOT, 'locale/en.json'), 'utf8'));
 
 check('package identity and entry points', () => {
-  assert.equal(packageJson.name, 'dsh-plugin-session-cleaner');
+  assert.equal(packageJson.name, '@estelle-ge/dsh-plugin-session-cleaner');
   assert.equal(packageJson.type, 'module');
   assert.equal(packageJson.main, 'index.js');
   assert.equal(packageJson.exports['.'], './index.js');
@@ -54,7 +54,7 @@ check('package identity and entry points', () => {
 
 check('development patch inserts one bundle row', () => {
   assert.match(patch, /id: session-cleaner/);
-  assert.match(patch, /name: dsh-plugin-session-cleaner/);
+  assert.match(patch, /name: "@estelle-ge\/dsh-plugin-session-cleaner"/);
   assert.equal((patch.match(/- insert:/g) ?? []).length, 1);
 });
 
@@ -109,7 +109,7 @@ const requireStub = (specifier) => {
 const bundle = definition.factory(requireStub);
 
 check('browser bundle exposes the module contract', () => {
-  assert.equal(definition.id, 'dsh-plugin-session-cleaner');
+  assert.equal(definition.id, '@estelle-ge/dsh-plugin-session-cleaner');
   assert.ok(Array.isArray(bundle.inject));
   assert.ok(bundle.inject.includes('slots'));
   assert.ok(bundle.inject.includes('locale'));
