@@ -29,10 +29,23 @@ A DeepSeek Harness Web sidebar plugin: **permanently delete a session** from its
 
 ## 安装
 
-Desktop 的 profile 由 Electron 应用独占管理，`dsh plugin --profile desktop ...` 会被拒绝。按环境选择：
+**远程安装（推荐，其他人也适用）**：DeepSeek Harness Desktop →「插件」页 →「添加插件」，
+输入下面的 git 规格（安装器接受 `github:` 简写、仓库 URL 或 tarball 地址），确认后
+**完全退出并重启应用**：
+
+```text
+github:gcggcg/dsh-plugin-session-cleaner
+# 或
+https://github.com/gcggcg/dsh-plugin-session-cleaner
+```
+
+插件不需要构建步骤：安装器 clone 仓库后，Host 入口 `index.js` 与浏览器 bundle
+`client.js` 会被直接加载。
+
+Desktop 的 profile 由 Electron 应用独占管理，`dsh plugin --profile desktop ...` 会被拒绝。
+其余安装方式按环境选择：
 
 ```bash
-# Desktop（发布版）：在应用内「插件」页安装 dsh-plugin-session-cleaner
 # Desktop（本地开发）：退出应用后，在 <DSH_HOME>\profiles\desktop\package.json 的
 #   dependencies 加 "dsh-plugin-session-cleaner": "link:<本仓库绝对路径>"，
 #   并把它追加到 dsh.profile.bundles；然后在 profile 目录用应用自带的 pnpm 执行
@@ -42,7 +55,7 @@ Desktop 的 profile 由 Electron 应用独占管理，`dsh plugin --profile desk
 #   **该目录**下的 profiles\desktop，否则重启后不会出现。
 
 # Web / TUI profile（CLI 管理）
-dsh plugin --profile web add dsh-plugin-session-cleaner
+dsh plugin --profile web add github:gcggcg/dsh-plugin-session-cleaner
 dsh plugin --profile web add link:<本仓库绝对路径>     # 本地开发
 ```
 
