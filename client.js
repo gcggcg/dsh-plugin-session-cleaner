@@ -31,8 +31,9 @@ window.__ModuleLoader__.load({
     /** Simplified Chinese dictionary (the key-set source of truth). */
     const zh = {
       'menu.delete': '删除会话',
-      'menu.showArchived': '显示归档会话',
-      'menu.hideArchived': '隐藏归档会话',
+      'archive.show': '显示归档会话',
+      'archive.hide': '隐藏归档会话',
+      'archive.label': '归档会话',
       'delete.title': '删除会话？',
       'delete.desc': '“{title}”及其全部历史记录将从磁盘永久删除，无法撤销。',
       'delete.note': '删除后，该会话不再出现在侧栏、工作区与搜索结果中。',
@@ -53,8 +54,9 @@ window.__ModuleLoader__.load({
     /** English dictionary, checked complete against the zh key set. */
     const en = {
       'menu.delete': 'Delete session',
-      'menu.showArchived': 'Show archived sessions',
-      'menu.hideArchived': 'Hide archived sessions',
+      'archive.show': 'Show archived sessions',
+      'archive.hide': 'Hide archived sessions',
+      'archive.label': 'Archived sessions',
       'delete.title': 'Delete this session?',
       'delete.desc': '“{title}” and its entire history will be permanently removed from disk. This cannot be undone.',
       'delete.note': 'After deletion the session disappears from the sidebar, its workspace and search results.',
@@ -72,13 +74,16 @@ window.__ModuleLoader__.load({
       'error.failed': 'Deleting the session failed: {message}',
     };
 
-    const STORAGE_KEY = 'dsh.session-cleaner.workspace-archived';
+    /** Persisted global archived-session visibility ('1' = shown, '0'/absent = hidden). */
+    const STORAGE_KEY = 'dsh.session-cleaner.archived-visible';
+    /** Pre-switch per-workspace state; removed on load so the old toggle cannot resurface. */
+    const LEGACY_STORAGE_KEY = 'dsh.session-cleaner.workspace-archived';
     /** Plugin-owned row marker: this archived session row must stay hidden. */
     const HIDDEN_ATTR = 'data-session-cleaner-archived-hidden';
-    /** Plugin-owned row marker: this archived session row belongs to an enabled workspace. */
-    const SHOWN_ATTR = 'data-session-cleaner-archived-shown';
-    /** Plugin-owned root marker selecting the archived-row flash guard. */
+    /** Plugin-owned root marker: hide archived rows until the controller classifies them. */
     const GUARD_ATTR = 'data-session-cleaner-archived-guard';
+    /** Plugin-owned marker on the injected sidebar switch container. */
+    const TOGGLE_ATTR = 'data-session-cleaner-archive-toggle';
 
     /** Plugin-local stylesheet; only the surfaces the primitives do not style. */
     const CSS = [
@@ -93,7 +98,16 @@ window.__ModuleLoader__.load({
       // Flash guard: an archived row is hidden from the moment it renders until
       // the controller has classified it (new rows never appear before tagging).
       `html[${GUARD_ATTR}="all"] [data-row-key^="session:"][aria-description]{display:none !important}`,
-      `html[${GUARD_ATTR}="filtered"] [data-row-key^="session:"][aria-description]:not([${SHOWN_ATTR}]){display:none !important}`,
+      // Sidebar switch row: inherits the official panel-row classes captured from
+      // the live sidebar; these rules only add the label fallback and the pill.
+      '.spc-archive-row{display:flex;width:100%}',
+      '.spc-archive-title{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}',
+      '.spc-archive-switch{flex:none;margin-left:auto;width:28px;height:16px;border-radius:999px;background:var(--dsw-alias-interactive-bg-secondary,rgba(120,120,120,.28));position:relative;transition:background .15s var(--ds-ease-in-out, ease)}',
+      '.spc-archive-switch.spc-on{background:var(--dsw-alias-state-business-primary,#2f6bff)}',
+      '.spc-archive-knob{position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s var(--ds-ease-in-out, ease)}',
+      '.spc-archive-switch.spc-on .spc-archive-knob{transform:translateX(12px)}',
+      '.spc-archive-compact .spc-archive-title,.spc-archive-compact .spc-archive-switch{display:none !important}',
+      '.spc-archive-compact .spc-archive-row{justify-content:center}',
     ].join('');
 
     // ────────────────────────────── tiny store ──────────────────────────────
@@ -289,7 +303,7 @@ window.__ModuleLoader__.load({
       return t('delete.failed', { message: result.message === undefined ? '' : result.message });
     }
 
-    // ───────────────── feature 2 · workspace archived visibility ────────────
+    // ───────────────── feature 2 · global archived visibility ──────────────
 
     /**
      * Check whether an element carries a CSS-module class token ending in
@@ -334,18 +348,14 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Workspace-domain labels resolved from the `workspace` dictionary so the
-     * DOM augmentation follows the active locale instead of hard-coded copy.
+     * Workspace-domain labels for the built-in archived-filter menu, resolved
+     * from the `workspace` dictionary so the fallback follows the locale.
      * @param ctx - client root context.
-     * @returns resolvers for the strings the controller needs.
+     * @returns resolver for the view-option strings.
      */
-    function workspaceLabels(ctx) {
+    function viewOptionLabels(ctx) {
       const fallback = (key) => {
         switch (key) {
-          case 'rename':
-            return '重命名';
-          case 'delete.workspace':
-            return '删除工作区';
           case 'viewOptions.label':
             return '视图选项';
           case 'viewOptions.showArchived':
@@ -364,9 +374,9 @@ window.__ModuleLoader__.load({
       } catch {
         translate = undefined;
       }
-      return (key, params) => {
+      return (key) => {
         try {
-          const value = translate === undefined ? key : translate(key, params);
+          const value = translate === undefined ? key : translate(key);
           if (typeof value !== 'string' || value === key) return fallback(key);
           return value;
         } catch {
@@ -375,40 +385,130 @@ window.__ModuleLoader__.load({
       };
     }
 
+    /** Read the persisted global visibility; only an explicit '1' means shown. */
+    function loadArchiveVisible() {
+      try {
+        return window.localStorage.getItem(STORAGE_KEY) === '1';
+      } catch {
+        return false;
+      }
+    }
+
+    /** Persist the global visibility and drop the legacy per-workspace record. */
+    function persistArchiveVisible(visible) {
+      try {
+        window.localStorage.setItem(STORAGE_KEY, visible ? '1' : '0');
+        window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+      } catch {
+        /* storage may be unavailable in hardened contexts; state stays in memory */
+      }
+    }
+
+    /** @returns the app's persisted archived filter ('default' | 'show' | 'only'). */
+    function readArchivedFilter() {
+      try {
+        const raw = window.localStorage.getItem('dsh.workspace.view.v5');
+        if (raw === null || raw === '') return undefined;
+        const parsed = JSON.parse(raw);
+        return parsed !== null && typeof parsed === 'object' && typeof parsed.archivedFilter === 'string' ? parsed.archivedFilter : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+
     /**
-     * Create the DOM augmentation that adds a per-workspace "show archived
-     * sessions" toggle to the built-in workspace folder menu and applies the
-     * chosen visibility to the sidebar rows.
+     * Sidebar switch component. One click flips the single global state; the
+     * switch itself renders `aria-checked` plus a pill so the state is visible
+     * at a glance and in the collapsed rail.
+     * @param props - visibility, captured sidebar classes, localized labels, toggle callback.
+     * @returns the switch row button.
+     */
+    function ArchiveVisibilitySwitch({ visible, classes, labelShow, labelHide, onToggle }) {
+      const action = visible ? labelHide : labelShow;
+      const rowClasses = [classes.rowClass, 'spc-archive-row'].filter((value) => typeof value === 'string' && value.length > 0).join(' ');
+      const titleClasses = [classes.titleClass, 'spc-archive-title'].filter((value) => typeof value === 'string' && value.length > 0).join(' ');
+      return h(
+        'button',
+        {
+          type: 'button',
+          role: 'switch',
+          'aria-checked': visible ? 'true' : 'false',
+          'aria-label': action,
+          title: action,
+          className: rowClasses,
+          onClick: onToggle,
+        },
+        h(
+          'span',
+          { className: classes.glyphClass === undefined ? '' : classes.glyphClass, 'aria-hidden': 'true' },
+          h(visible ? primitives.IconArchiveCheckOutlineRegular : primitives.IconArchiveOutlineRegular, { size: 16 }),
+        ),
+        h('span', { className: titleClasses }, action),
+        h(
+          'span',
+          { className: visible ? 'spc-archive-switch spc-on' : 'spc-archive-switch', 'aria-hidden': 'true' },
+          h('span', { className: 'spc-archive-knob' }),
+        ),
+      );
+    }
+
+    /**
+     * Host component of the injected switch row.
+     * @param props - controller providing the two observable stores and the toggle.
+     * @returns the switch component subscribed to visibility + layout.
+     */
+    function ArchiveVisibilityHost({ controller }) {
+      const [visible, setVisible] = React.useState(controller.visibility.getSnapshot());
+      const [classes, setClasses] = React.useState(controller.layout.getSnapshot());
+      React.useEffect(() => {
+        const offVisibility = controller.visibility.subscribe(() => setVisible(controller.visibility.getSnapshot()));
+        const offLayout = controller.layout.subscribe(() => setClasses(controller.layout.getSnapshot()));
+        return () => {
+          offVisibility();
+          offLayout();
+        };
+      }, [controller]);
+      return h(ArchiveVisibilitySwitch, {
+        visible,
+        classes,
+        labelShow: controller.labelShow,
+        labelHide: controller.labelHide,
+        onToggle: () => controller.toggle(!visible),
+      });
+    }
+
+    /**
+     * Create the global "show archived sessions" switch and its visibility
+     * controller.
      *
-     * The owning package hard-codes that menu and declares no slot for it, so
-     * this controller decorates the portaled menu card when it opens. The
-     * archived filter itself is driven through the live WorkspaceBrowser store
-     * actions found on the React fiber; a menu-click fallback covers builds
-     * where the fiber walk fails.
-     *
-     * Archived visibility is plugin-owned and deterministic: while at least one
-     * workspace toggle is on, the built-in filter is driven to `show` (so the
-     * archived rows can render) and only the enabled workspaces' archived rows
-     * stay visible; with every toggle off, the built-in filter is driven to
-     * `default` and every archived row is hidden. Hiding is expressed as a
-     * plugin-owned row attribute plus an injected CSS rule, never an inline
-     * style, so a React re-render or an attribute update cannot resurrect a
-     * hidden row.
+     * The switch is one plugin-owned row injected into the sidebar panel list
+     * directly below 自动化任务, reusing the live panel-row classes so it matches
+     * the surrounding rows (and their collapsed-rail layout). It replaces the
+     * old per-workspace menu toggle: one click flips one global state, and the
+     * controller drives the built-in archived filter to `show` (all archived
+     * sessions of every workspace visible) or `default` (all hidden). A guard
+     * attribute plus a CSS rule hide archived rows from the instant they render,
+     * so a failed/racy filter drive can never flash stale archived rows.
      * @param ctx - client root context.
-     * @returns disposer removing every listener/observer it installed.
+     * @returns disposer removing the injected row, observers and row markers.
      */
     function createArchivedVisibility(ctx) {
       if (typeof document === 'undefined' || typeof window === 'undefined' || typeof MutationObserver === 'undefined') return () => {};
       if (typeof createRoot !== 'function') return () => {};
 
-      const label = workspaceLabels(ctx);
+      const label = viewOptionLabels(ctx);
+      const viewOptionsLabel = label('viewOptions.label');
+      const showArchivedLabel = label('viewOptions.showArchived');
+      const onlyArchivedLabel = label('viewOptions.onlyArchived');
+      const hideArchivedLabel = label('viewOptions.hideArchived');
+
       let pluginT;
       try {
         pluginT = ctx.locale.bind(NS);
       } catch {
         pluginT = (key) => key;
       }
-      const pluginLabel = (key) => {
+      const tr = (key) => {
         try {
           const value = pluginT(key);
           return typeof value === 'string' && value !== '' ? value : key;
@@ -416,161 +516,84 @@ window.__ModuleLoader__.load({
           return key;
         }
       };
-      const renameLabel = label('rename');
-      const deleteLabel = label('delete.workspace');
-      const viewOptionsLabel = label('viewOptions.label');
-      const showArchivedLabel = label('viewOptions.showArchived');
-      const hideArchivedLabel = label('viewOptions.hideArchived');
-      const onlyArchivedLabel = label('viewOptions.onlyArchived');
-      const workspaceActionTemplate = label('actions.workspace.aria');
-      const workspaceActionPrefix = workspaceActionTemplate.includes('{name}') ? workspaceActionTemplate.slice(0, workspaceActionTemplate.indexOf('{name}')) : undefined;
-      const workspaceActionSuffix =
-        workspaceActionPrefix === undefined ? undefined : workspaceActionTemplate.slice(workspaceActionTemplate.indexOf('{name}') + '{name}'.length);
+      const labelShow = tr('archive.show');
+      const labelHide = tr('archive.hide');
 
-      /** Persisted per-workspace toggles; an older `restoreFilter` field is ignored. */
-      let state = loadState();
-      /** Menu trigger click observed just before the owned menu opens. */
-      let pendingMenu = null;
-      /** One decoration per open menu card. */
-      const decorations = new Map();
-      let scheduled = false;
+      const visibility = createStore(loadArchiveVisible());
+      const layout = createStore({ rowClass: undefined, glyphClass: undefined, titleClass: undefined, compact: false });
+      /** Face handed to the injected React root. `toggle` is a hoisted declaration below. */
+      const controller = { visibility, layout, toggle, labelShow, labelHide };
+
+      /** Injected container / React root; re-created if React removes the row. */
+      let container = null;
+      let root = null;
+      let insertedAfter = null;
+      let resizeObserver = null;
+      let resizedNav = null;
       let disposed = false;
+      let scheduled = false;
       let bootstrapped = false;
-      /** Built-in filter value last requested by this controller (null before the first drive). */
-      let drivenFilter = null;
       let lastDriveAt = 0;
-      /** Re-assert budget for the current (target filter, render state) episode. */
-      let driftEpisode = '';
-      let driftAttempts = 0;
-      let guardMode = null;
+      let driveAttempts = 0;
+      let lastTarget = null;
 
-      function loadState() {
-        try {
-          const raw = window.localStorage.getItem(STORAGE_KEY);
-          if (raw === null || raw === '') return { enabled: {} };
-          const parsed = JSON.parse(raw);
-          if (parsed === null || typeof parsed !== 'object') return { enabled: {} };
-          const enabled = {};
-          if (parsed.enabled !== null && typeof parsed.enabled === 'object') {
-            for (const [key, value] of Object.entries(parsed.enabled)) if (value === true) enabled[key] = true;
+      /**
+       * Set or clear the plugin-owned hidden marker on rendered archived rows.
+       * @param visible - current global visibility.
+       */
+      function syncRowMarkers(visible) {
+        for (const row of document.querySelectorAll('[data-row-key^="session:"]')) {
+          const archived = row.hasAttribute('aria-description') || hasClassSuffix(row, '_archived');
+          if (archived && !visible) {
+            if (!row.hasAttribute(HIDDEN_ATTR)) row.setAttribute(HIDDEN_ATTR, '');
+          } else if (row.hasAttribute(HIDDEN_ATTR)) {
+            row.removeAttribute(HIDDEN_ATTR);
           }
-          return { enabled };
-        } catch {
-          return { enabled: {} };
         }
       }
 
-      function saveState() {
-        try {
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        } catch {
-          /* storage may be unavailable in hardened contexts; state stays in memory */
+      /**
+       * Apply the visibility state to the DOM immediately: the guard attribute
+       * hides every archived row synchronously while the built-in filter is
+       * driven to the matching value.
+       * @param visible - whether archived sessions must be visible.
+       */
+      function applyVisibility(visible) {
+        const rootElement = document.documentElement;
+        if (rootElement !== null) {
+          if (visible) rootElement.removeAttribute(GUARD_ATTR);
+          else rootElement.setAttribute(GUARD_ATTR, 'all');
         }
-      }
-
-      function enabledIds() {
-        return Object.keys(state.enabled).filter((id) => state.enabled[id] === true);
-      }
-
-      function isEnabled(workspaceId) {
-        return workspaceId !== '' && state.enabled[workspaceId] === true;
+        syncRowMarkers(visible);
+        driveFilter(visible ? 'show' : 'default');
       }
 
       /**
-       * Read the sidebar registry snapshot: the archived Session ids and each
-       * Session's Workspace. The data is only used to complement the DOM
-       * signal, so an absent service degrades to the DOM-only path.
-       * @returns archived id set plus Session-id -> Workspace-id map.
-       */
-      function readRegistry() {
-        const bySession = new Map();
-        const archived = new Set();
-        try {
-          const workspaces = ctx.get('workspaces');
-          const snapshot = workspaces === undefined || workspaces === null ? undefined : workspaces.list.getSnapshot();
-          if (snapshot !== null && typeof snapshot === 'object') {
-            const items = Array.isArray(snapshot.items) ? snapshot.items : [];
-            for (const item of items) {
-              if (item === null || typeof item !== 'object' || !Array.isArray(item.sessionIds)) continue;
-              for (const sessionId of item.sessionIds) bySession.set(sessionId, item.workspaceId);
-            }
-            const archivedIds = Array.isArray(snapshot.archivedSessionIds) ? snapshot.archivedSessionIds : [];
-            for (const sessionId of archivedIds) archived.add(sessionId);
-          }
-        } catch {
-          /* optional service: the DOM signal still classifies every rendered row */
-        }
-        return { bySession, archived };
-      }
-
-      /**
-       * @param row - rendered session row.
-       * @returns the stored Session id, or '' when the row has no key.
-       */
-      function rowSessionId(row) {
-        const key = row.getAttribute('data-row-key');
-        return key === null ? '' : key.slice('session:'.length);
-      }
-
-      /**
-       * @param row - rendered session row.
-       * @param registry - sidebar registry snapshot.
-       * @returns true when the row shows an archived session.
-       */
-      function rowArchived(row, registry) {
-        if (registry.archived.has(rowSessionId(row))) return true;
-        return row.hasAttribute('aria-description') || hasClassSuffix(row, '_archived');
-      }
-
-      /**
-       * Map one session row to its workspace. The grouping section is the
-       * primary contract; the registry map covers the flat list (no sections).
-       * @param row - rendered session row.
-       * @param registry - sidebar registry snapshot.
-       * @returns workspace id, or '' for the ungrouped bucket.
-       */
-      function rowWorkspaceId(row, registry) {
-        const section = row.closest('[style*="--dsh-workspace-indent"]');
-        if (section !== null) {
-          const workspaceRow = section.querySelector('[data-row-key^="workspace:"]');
-          const key = workspaceRow === null ? null : workspaceRow.getAttribute('data-row-key');
-          if (key !== null) return key.slice('workspace:'.length);
-        }
-        return registry.bySession.get(rowSessionId(row)) ?? '';
-      }
-
-      /** @returns the built-in archived filter the plugin requires right now. */
-      function desiredFilter() {
-        return enabledIds().length > 0 ? 'show' : 'default';
-      }
-
-      /** @returns every rendered archived session row, hidden ones included. */
-      function renderedArchivedRows() {
-        return Array.from(document.querySelectorAll('[data-row-key^="session:"]')).filter(
-          (row) => row.hasAttribute('aria-description') || hasClassSuffix(row, '_archived'),
-        );
-      }
-
-      /**
-       * Apply the archived filter through the WorkspaceBrowser actions.
+       * Drive the built-in archived filter through the WorkspaceBrowser store
+       * actions; the localized view-options menu is the fallback.
        * @param filter - target filter value.
-       * @returns true when the action was invoked.
+       * @returns true when the action was invoked synchronously.
        */
-      function applyFilter(filter) {
+      function driveFilter(filter) {
+        const now = Date.now();
+        if (now - lastDriveAt < 120) return false;
+        lastDriveAt = now;
         const actions = findWorkspaceViewActions();
-        if (actions === undefined) return false;
-        try {
-          actions.setArchivedFilter(filter);
-          return true;
-        } catch {
-          return false;
+        if (actions !== undefined) {
+          try {
+            actions.setArchivedFilter(filter);
+            return true;
+          } catch {
+            /* fall through to the menu path */
+          }
         }
+        void applyFilterViaMenu(filter);
+        return false;
       }
 
       /**
        * Fallback for builds where the fiber walk fails: open the sidebar view
-       * options menu, activate the matching archived-filter row, and let the
-       * menu close.
+       * options menu, activate the matching archived-filter row, close it.
        * @param filter - target filter value.
        * @returns promise resolving true when a menu row was activated.
        */
@@ -580,9 +603,8 @@ window.__ModuleLoader__.load({
         );
         if (trigger === undefined) return false;
         trigger.click();
-        const target =
-          filter === 'show' ? showArchivedLabel : filter === 'only' ? onlyArchivedLabel : hideArchivedLabel;
-        const deadline = Date.now() + 800;
+        const target = filter === 'show' ? showArchivedLabel : filter === 'only' ? onlyArchivedLabel : hideArchivedLabel;
+        const deadline = Date.now() + 900;
         while (Date.now() < deadline && !disposed) {
           await new Promise((resolve) => window.setTimeout(resolve, 25));
           const cards = Array.from(document.querySelectorAll('[data-menu-material]'));
@@ -600,290 +622,173 @@ window.__ModuleLoader__.load({
         return false;
       }
 
-      /**
-       * Ask the built-in view for `filter`. Interval-guarded so a drive that
-       * cannot take effect cannot spin against React renders.
-       * @param filter - target filter value.
-       */
-      function driveFilter(filter) {
-        const now = Date.now();
-        if (now - lastDriveAt < 150) return;
-        lastDriveAt = now;
-        if (applyFilter(filter)) {
-          drivenFilter = filter;
-          return;
-        }
-        void applyFilterViaMenu(filter).then((ok) => {
-          if (!ok || disposed) return;
-          drivenFilter = filter;
-          schedule();
-        });
+      /** @returns whether the built-in filter currently matches `target`. */
+      function filterSettled(target) {
+        const persisted = readArchivedFilter();
+        if (persisted === target) return true;
+        if (persisted !== undefined) return false;
+        const rendered = Array.from(document.querySelectorAll('[data-row-key^="session:"]')).filter(
+          (row) => row.hasAttribute('aria-description') && row.getClientRects().length > 0,
+        );
+        return target === 'show' ? rendered.length > 0 : rendered.length === 0;
       }
 
       /**
-       * Keep the built-in filter at the plugin's target. A manual view-option
-       * pick (or a store re-render) that moves it away is re-asserted a bounded
-       * number of times; the CSS guard keeps hiding archived rows meanwhile.
+       * Capture the live sidebar panel-row classes so the injected row matches
+       * the surrounding rows without hard-coding hashed CSS-module names.
+       * @param anchor - one rendered panel-row button.
+       * @returns class strings for the row, glyph and title.
        */
-      function reconcileFilter() {
-        const desired = desiredFilter();
-        const rendered = renderedArchivedRows();
-        if (drivenFilter !== desired) {
-          driveFilter(desired);
-          return;
-        }
-        const episode = `${desired}|${rendered.length}|${enabledIds().length}`;
-        if (episode !== driftEpisode) {
-          driftEpisode = episode;
-          driftAttempts = 0;
-        }
-        if (driftAttempts >= 3) return;
-        let drift = false;
-        if (desired === 'default') {
-          drift = rendered.length > 0;
-        } else if (rendered.length === 0) {
-          const registry = readRegistry();
-          let expected = 0;
-          for (const sessionId of registry.archived) if (isEnabled(registry.bySession.get(sessionId) ?? '')) expected += 1;
-          drift = expected > 0;
-        }
-        if (!drift) return;
-        driftAttempts += 1;
-        driveFilter(desired);
+      function captureClasses(anchor) {
+        const spans = Array.from(anchor.querySelectorAll('span'));
+        const glyph = spans.find((span) => hasClassSuffix(span, '_panelGlyph')) ?? spans[0];
+        const title =
+          spans.find((span) => hasClassSuffix(span, '_panelTitle')) ??
+          spans.find((span) => span !== glyph && (span.textContent ?? '').trim().length > 0);
+        return {
+          rowClass: anchor.getAttribute('class') ?? undefined,
+          glyphClass: glyph === undefined ? undefined : glyph.getAttribute('class') ?? undefined,
+          titleClass: title === undefined ? undefined : title.getAttribute('class') ?? undefined,
+        };
+      }
+
+      /** @returns the sidebar panel-list nav, when mounted. */
+      function findPanelNav() {
+        return document.querySelector('nav[class*="panelList"]');
       }
 
       /**
-       * Tag one archived row for the plugin-owned CSS. The attribute survives
-       * React re-renders because React only reconciles the props it owns.
-       * @param row - archived session row.
-       * @param show - whether this row must stay visible.
+       * @param nav - sidebar panel-list nav.
+       * @returns the normally rendered panel-row buttons, excluding the More launcher.
        */
-      function tagArchivedRow(row, show) {
-        if (show) {
-          if (row.hasAttribute(HIDDEN_ATTR)) row.removeAttribute(HIDDEN_ATTR);
-          if (!row.hasAttribute(SHOWN_ATTR)) row.setAttribute(SHOWN_ATTR, '');
-          return;
+      function panelRows(nav) {
+        return Array.from(nav.querySelectorAll('button')).filter(
+          (button) => button.getAttribute('aria-haspopup') !== 'menu' && button.getAttribute('aria-expanded') === null,
+        );
+      }
+
+      /**
+       * @param rows - panel-row buttons.
+       * @returns the 自动化任务 row when present, else the second (then first) row.
+       */
+      function anchorRow(rows) {
+        const automation = rows.find((row) => /自动化|Automation|Schedul/i.test(row.getAttribute('aria-label') ?? ''));
+        return automation ?? rows[1] ?? rows[0];
+      }
+
+      /** Create/refresh the injected switch row; harmless when the nav is absent. */
+      function ensureSwitchRow() {
+        const nav = findPanelNav();
+        if (nav === null) return;
+        const rows = panelRows(nav);
+        if (rows.length === 0) return;
+        const anchor = anchorRow(rows);
+        if (anchor === undefined) return;
+
+        const classes = captureClasses(anchor);
+        const compact = nav.getBoundingClientRect().width < 90;
+        const nextLayout = { ...classes, compact };
+        const currentLayout = layout.getSnapshot();
+        if (
+          currentLayout.rowClass !== nextLayout.rowClass ||
+          currentLayout.glyphClass !== nextLayout.glyphClass ||
+          currentLayout.titleClass !== nextLayout.titleClass ||
+          currentLayout.compact !== nextLayout.compact
+        ) {
+          layout.set(nextLayout);
         }
-        if (row.hasAttribute(SHOWN_ATTR)) row.removeAttribute(SHOWN_ATTR);
-        if (!row.hasAttribute(HIDDEN_ATTR)) row.setAttribute(HIDDEN_ATTR, '');
-      }
 
-      /**
-       * Drop the plugin markers from a row that is no longer archived.
-       * @param row - ordinary session row.
-       */
-      function untagRow(row) {
-        if (row.hasAttribute(HIDDEN_ATTR)) row.removeAttribute(HIDDEN_ATTR);
-        if (row.hasAttribute(SHOWN_ATTR)) row.removeAttribute(SHOWN_ATTR);
-      }
+        if (container === null || !container.isConnected) {
+          container = document.createElement('div');
+          container.setAttribute(TOGGLE_ATTR, '');
+          if (compact) container.classList.add('spc-archive-compact');
+          if (root === null) root = createRoot(container);
+          anchor.parentNode.insertBefore(container, anchor.nextSibling);
+          insertedAfter = anchor;
+          root.render(h(ArchiveVisibilityHost, { controller }));
+        } else if (insertedAfter !== anchor || container.previousSibling !== anchor) {
+          anchor.parentNode.insertBefore(container, anchor.nextSibling);
+          insertedAfter = anchor;
+        }
+        if (currentLayout.compact !== compact) {
+          container.classList.toggle('spc-archive-compact', compact);
+        }
 
-      /**
-       * Root-level guard that hides archived rows before the per-row tagging
-       * lands (new rows render hidden instead of flashing visible).
-       * @param mode - `all` (every toggle off), `filtered` (some toggle on), or null to clear.
-       */
-      function setGuard(mode) {
-        if (guardMode === mode) return;
-        guardMode = mode;
-        const root = document.documentElement;
-        if (root === null) return;
-        if (mode === null) root.removeAttribute(GUARD_ATTR);
-        else root.setAttribute(GUARD_ATTR, mode);
-      }
-
-      /**
-       * Recompute archived-row visibility from the enabled set. Every call is a
-       * full recomputation, so virtualized/re-rendered rows converge to the
-       * same state.
-       */
-      function applyHiding() {
-        const allOff = enabledIds().length === 0;
-        setGuard(allOff ? 'all' : 'filtered');
-        const registry = readRegistry();
-        for (const row of document.querySelectorAll('[data-row-key^="session:"]')) {
-          if (!rowArchived(row, registry)) {
-            untagRow(row);
-            continue;
+        if (resizedNav !== nav) {
+          if (resizeObserver !== null) resizeObserver.disconnect();
+          if (typeof ResizeObserver === 'function') {
+            resizeObserver = new ResizeObserver(() => schedule());
+            resizeObserver.observe(nav);
           }
-          tagArchivedRow(row, !allOff && isEnabled(rowWorkspaceId(row, registry)));
+          resizedNav = nav;
         }
       }
 
-      /** Restore every row this controller touched (plugin unload). */
-      function clearHiding() {
-        setGuard(null);
-        for (const row of document.querySelectorAll(`[${HIDDEN_ATTR}], [${SHOWN_ATTR}]`)) untagRow(row);
+      /** Toggle the single global visibility state. */
+      function toggle(next) {
+        const value = next === true;
+        visibility.set(value);
+        persistArchiveVisible(value);
+        driveAttempts = 0;
+        lastTarget = value ? 'show' : 'default';
+        applyVisibility(value);
+        schedule();
       }
 
-      /** @returns whether the sidebar has rendered any session rows yet. */
-      function sidebarReady() {
-        return document.querySelector('[data-row-key^="session:"]') !== null || document.querySelector('[data-row-key^="workspace:"]') !== null;
-      }
-
-      /**
-       * Reconcile the built-in filter and the rendered archived rows after any
-       * relevant DOM change.
-       */
-      function tick() {
+      /** Reconcile the guard, row markers, injected row and built-in filter. */
+      function reconcile() {
         if (disposed) return;
-        cleanupDecorations();
-        decoratePendingMenu();
-        if (!bootstrapped) {
-          if (!sidebarReady()) return;
-          bootstrapped = true;
+        ensureSwitchRow();
+        const visible = visibility.getSnapshot() === true;
+        const target = visible ? 'show' : 'default';
+        if (lastTarget !== target) {
+          lastTarget = target;
+          driveAttempts = 0;
         }
-        reconcileFilter();
-        applyHiding();
+        if (target === 'default') {
+          const rootElement = document.documentElement;
+          if (rootElement !== null && rootElement.getAttribute(GUARD_ATTR) !== 'all') rootElement.setAttribute(GUARD_ATTR, 'all');
+        } else {
+          const rootElement = document.documentElement;
+          if (rootElement !== null && rootElement.hasAttribute(GUARD_ATTR)) rootElement.removeAttribute(GUARD_ATTR);
+        }
+        syncRowMarkers(visible);
+        if (!bootstrapped) {
+          bootstrapped = true;
+          applyVisibility(visible);
+          return;
+        }
+        if (!filterSettled(target)) {
+          if (driveAttempts < 12) {
+            driveAttempts += 1;
+            driveFilter(target);
+          }
+        } else {
+          driveAttempts = 0;
+        }
       }
 
+      /** Schedule one reconcile on the next animation frame. */
       function schedule() {
         if (scheduled || disposed) return;
         scheduled = true;
         window.requestAnimationFrame(() => {
           scheduled = false;
-          tick();
+          reconcile();
         });
       }
 
-      /** Unmount decorations whose menu card left the document. */
-      function cleanupDecorations() {
-        for (const [card, decoration] of decorations) {
-          if (document.contains(card)) continue;
-          decorations.delete(card);
-          try {
-            decoration.root.unmount();
-          } catch {
-            /* the card may be removed while React is already unmounting */
-          }
-        }
-      }
-
       /**
-       * Remember a workspace menu trigger press. The owned menu opens on click,
-       * one frame after the pointerdown this listener observes.
-       * @param event - document pointerdown.
-       */
-      function onPointerDown(event) {
-        const target = event.target;
-        if (!(target instanceof Element)) return;
-        const row = target.closest('[data-row-key^="workspace:"]');
-        if (row === null) return;
-        const actions = row.lastElementChild;
-        if (actions === null) return;
-        const buttons = actions.querySelectorAll('button');
-        if (buttons.length < 2) return;
-        const trigger = buttons[0];
-        if (!(trigger === target || trigger.contains(target))) return;
-        const aria = trigger.getAttribute('aria-label');
-        if (workspaceActionPrefix !== undefined && (aria === null || !aria.startsWith(workspaceActionPrefix) || !aria.endsWith(workspaceActionSuffix))) return;
-        const key = row.getAttribute('data-row-key');
-        if (key === null) return;
-        pendingMenu = { workspaceId: key.slice('workspace:'.length), at: Date.now() };
-        schedule();
-      }
-
-      /** Append the toggle to the workspace menu card that just opened. */
-      function decoratePendingMenu() {
-        if (pendingMenu === null) return;
-        if (Date.now() - pendingMenu.at > 3000) {
-          pendingMenu = null;
-          return;
-        }
-        const cards = Array.from(document.querySelectorAll('[data-menu-material]'));
-        for (const card of cards) {
-          if (decorations.has(card)) continue;
-          if (!isWorkspaceMenu(card)) continue;
-          decorateMenu(card, pendingMenu.workspaceId);
-          pendingMenu = null;
-          return;
-        }
-      }
-
-      /**
-       * @param card - portaled menu card.
-       * @returns true when the card holds both built-in workspace rows.
-       */
-      function isWorkspaceMenu(card) {
-        const labels = Array.from(card.querySelectorAll('button[role="menuitem"]'), (button) => (button.textContent ?? '').trim());
-        return labels.includes(renameLabel) && labels.includes(deleteLabel);
-      }
-
-      /**
-       * Render the toggle row between rename and delete.
-       * @param card - portaled menu card.
-       * @param workspaceId - workspace the menu belongs to.
-       */
-      function decorateMenu(card, workspaceId) {
-        const viewport = Array.from(card.children).find((child) => child.getAttribute('role') === 'presentation');
-        if (viewport === undefined) return;
-        const container = document.createElement('div');
-        container.setAttribute('data-session-cleaner-menu', '');
-        const root = createRoot(container);
-        const closeMenu = () => {
-          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-        };
-        const render = () => {
-          const on = isEnabled(workspaceId);
-          root.render(
-            h(
-              primitives.MenuItemButton,
-              {
-                icon: h(on ? primitives.IconArchiveCheckOutlineRegular : primitives.IconArchiveOutlineRegular, { size: 16 }),
-                current: on,
-                onSelect: () => {
-                  setWorkspaceEnabled(workspaceId, !on);
-                  closeMenu();
-                },
-              },
-              on ? pluginLabel('menu.hideArchived') : pluginLabel('menu.showArchived'),
-            ),
-          );
-        };
-        decorations.set(card, { root, container });
-        const children = Array.from(viewport.children);
-        let lastItem;
-        for (let index = children.length - 1; index >= 0; index -= 1) {
-          const child = children[index];
-          const button = child.querySelector === undefined ? null : child.querySelector('button[role="menuitem"]');
-          if (button !== null && button !== undefined && (button.textContent ?? '').trim() === deleteLabel) {
-            lastItem = child;
-            break;
-          }
-        }
-        if (lastItem !== undefined) viewport.insertBefore(container, lastItem);
-        else viewport.appendChild(container);
-        render();
-      }
-
-      /**
-       * Toggle one workspace. The built-in filter target and the row tagging are
-       * derived from the enabled set on the next tick, so on/off is symmetric
-       * and cannot inherit a previously detected filter.
-       * @param workspaceId - toggled workspace.
-       * @param next - whether archived sessions should show there.
-       */
-      function setWorkspaceEnabled(workspaceId, next) {
-        if (next) state.enabled[workspaceId] = true;
-        else delete state.enabled[workspaceId];
-        saveState();
-        drivenFilter = null;
-        driftEpisode = '';
-        driftAttempts = 0;
-        schedule();
-      }
-
-      document.addEventListener('pointerdown', onPointerDown, true);
-      /**
-       * Whether one DOM mutation can affect the sidebar rows, workspace groups
-       * or a portaled menu. Filters out chat streaming churn so the controller
+       * Whether one DOM mutation can affect the sidebar rows, the panel list or
+       * a portaled menu. Filters out chat streaming churn so the controller
        * stays idle while a conversation renders.
        * @param node - added/removed node.
        * @returns true when the node may matter.
        */
       function isRelevantNode(node) {
         if (!(node instanceof Element)) return false;
-        if (node.matches('[data-row-key], [data-menu-material]')) return true;
-        return node.querySelector('[data-row-key], [data-menu-material]') !== null;
+        if (node.matches('[data-row-key], [data-menu-material], nav, button')) return true;
+        return node.querySelector('[data-row-key], [data-menu-material], nav') !== null;
       }
 
       const observer = new MutationObserver((records) => {
@@ -891,7 +796,7 @@ window.__ModuleLoader__.load({
           if (record.type === 'attributes') {
             const target = record.target;
             if (!(target instanceof Element)) continue;
-            if (target.matches('[data-row-key]') || target.closest('[data-row-key]') !== null) {
+            if (target.matches('[data-row-key], nav') || target.closest('[data-row-key]') !== null) {
               schedule();
               return;
             }
@@ -911,23 +816,35 @@ window.__ModuleLoader__.load({
           }
         }
       });
-      // `class`/`style` are watched because a re-render can rewrite a row's
-      // attributes; the plugin's own row/root attributes are never in the
-      // filter, so tagging cannot retrigger itself.
       observer.observe(document.body, {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['style', 'class', 'aria-description', 'data-row-key'],
+        attributeFilter: ['class', 'style', 'aria-description', 'data-row-key'],
       });
       schedule();
 
       return () => {
         disposed = true;
-        document.removeEventListener('pointerdown', onPointerDown, true);
         observer.disconnect();
-        cleanupDecorations();
-        clearHiding();
+        if (resizeObserver !== null) {
+          resizeObserver.disconnect();
+          resizeObserver = null;
+        }
+        if (root !== null) {
+          try {
+            root.unmount();
+          } catch {
+            /* the container may already be detached */
+          }
+          root = null;
+        }
+        if (container !== null && container.isConnected) container.remove();
+        container = null;
+        insertedAfter = null;
+        const rootElement = document.documentElement;
+        if (rootElement !== null) rootElement.removeAttribute(GUARD_ATTR);
+        for (const row of document.querySelectorAll(`[${HIDDEN_ATTR}]`)) row.removeAttribute(HIDDEN_ATTR);
       };
     }
 

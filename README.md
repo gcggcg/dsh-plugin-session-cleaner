@@ -3,9 +3,9 @@
 [![开放插件市场](https://img.shields.io/endpoint?url=https%3A%2F%2Fdshopen.org%2Fbadge%2F%40estelle-ge%2Fdsh-plugin-session-cleaner.json)](https://dshopen.org/zh/plugins/@estelle-ge/dsh-plugin-session-cleaner/)
 [![npm](https://img.shields.io/npm/v/@estelle-ge/dsh-plugin-session-cleaner.svg)](https://www.npmjs.com/package/@estelle-ge/dsh-plugin-session-cleaner)
 
-DeepSeek Harness Web 侧栏的会话清理插件：在会话行 `...` 菜单中**永久删除会话**，并在工作区文件夹 `...` 菜单中按工作区**显示 / 隐藏已归档会话**。
+DeepSeek Harness Web 侧栏的会话清理插件：在会话行 `...` 菜单中**永久删除会话**，并用侧栏的全局开关**一键显示 / 隐藏全部已归档会话**。
 
-A DeepSeek Harness Web sidebar plugin: **permanently delete a session** from its row `...` menu, and **show / hide archived sessions per workspace** from the workspace folder `...` menu.
+A DeepSeek Harness Web sidebar plugin: **permanently delete a session** from its row `...` menu, and **show / hide all archived sessions** with one global sidebar switch.
 
 ## 功能
 
@@ -22,13 +22,14 @@ A DeepSeek Harness Web sidebar plugin: **permanently delete a session** from its
 - DSH 打开过的会话（包括当前主视图里的会话）也可以直接删除，无需重启：Windows 上日志文件以 `FILE_SHARE_DELETE` 打开、写锁是内核信号量而非文件锁，因此打开状态下也能移除；删除当前会话后客户端会自动新建一个空会话。只有在运行中的 Agent 无法在限时内停止时才会拒绝（提示先停止该会话的工作）。
 - 会话 ID 支持 DSH 的完整形态：`session-<uuid>`、旧版 `sess_<uuid>` 与子代理的裸 `<uuid>`。
 
-### 按工作区显示归档会话
+### 全局显示 / 隐藏归档会话（侧栏开关）
 
-- 工作区文件夹行 → `...` → **显示归档会话 / 隐藏归档会话**，每个工作区独立开关，默认关闭，保存在浏览器 `localStorage`（键 `dsh.session-cleaner.workspace-archived`，值 `{"enabled":{"<workspaceId>":true}}`）。
-- 打开某个工作区的开关后，侧栏会切到内置的「全部对话（显示已归档）」筛选，并只在该工作区下显示已归档会话；其他工作区与「未分组」的归档会话保持隐藏。
-- 关闭最后一个开关后，内置筛选会切回「隐藏已归档」，并且插件用注入的 CSS + 行属性隐藏所有已归档行 —— 即使内置筛选此前被手动设为「显示已归档」或页面重载，也不会再冒出来。
-- 隐藏不依赖 React 重渲染：行标记是插件自有属性（`data-session-cleaner-archived-hidden`），配合 `!important` 规则，列表重新渲染/虚拟滚动不会让隐藏的归档行重新出现。
-- 已归档会话行保持内置的灰色样式与「取消归档」菜单；要取消归档，先打开该工作区的开关让它显示出来再操作（插件开启时会接管归档筛选）。
+- 侧栏面板列表里、**「自动化任务」下方**有一个 **归档会话** 开关（`button[role="switch"]`，右侧胶囊开关，一眼可见当前状态），默认**关闭**（隐藏全部归档会话）。
+- 点一下开关即切换：**显示归档会话** → 所有工作区（含「未分组」）的已归档会话一次性全部显示；**隐藏归档会话** → 一次性全部隐藏。只点一次即可，不再需要进每个工作区的 `...` 菜单逐个切换。
+- 状态保存在浏览器 `localStorage`（键 `dsh.session-cleaner.archived-visible`，`'1'` = 显示，`'0'`/缺省 = 隐藏），刷新/重启后保持；旧版按工作区保存的 `dsh.session-cleaner.workspace-archived` 会被自动清理。
+- 隐藏不依赖 React 重渲染：插件用注入的 CSS + 行属性（`data-session-cleaner-archived-hidden`）在归档行渲染的第一帧前就隐藏它，列表重新渲染/虚拟滚动不会让隐藏的归档行重新出现；当开关关闭时，即使手动把内置筛选切到「全部对话（显示已归档）」，插件也会把筛选拉回「隐藏已归档」。
+- 已归档会话行保持内置的灰色样式与「取消归档」菜单；打开开关显示出来后即可正常取消归档。
+- 折叠的工作区分组不会渲染会话行——展开对应工作区分组后即可看到其归档会话。折叠侧栏时开关行会收成图标（胶囊状态仍可见）。
 
 ## 安装
 
@@ -73,20 +74,21 @@ dsh plugin --profile web add link:<本仓库绝对路径>     # 本地开发
 
 - 删除入口使用官方 slot `sidebar.workspaces.session.menu.item`（`order: 500`，`danger`）。
 - 删除通过 Host 的受认证路由 `POST /api/session-cleaner/delete` 完成；该路由复用 `connection.requestRejection()` 的 Host/Origin/Cookie 校验，并在任何破坏性操作前停止运行中的 Agent、检查残留活动（`workspace/session-activity`）。
-- 工作区菜单没有官方扩展 slot，因此浏览器端在菜单打开时把开关行注入 portaled 菜单卡；归档筛选通过 WorkspaceBrowser 暴露的 store actions 驱动（`setArchivedFilter`），并以后备的菜单点击路径兜底。
-- 归档可见性由插件完全接管：有任一工作区开关时筛选为 `show`、只显示已启用工作区的归档行；全部关闭时筛选为 `default` 并隐藏所有归档行。
+- 归档开关是官方 `sidebar.panellist`（面板列表）下方的一行自绘 React 行：先读取实时面板行的 CSS Modules 类名以匹配外观，再插入到「自动化任务」行之后；归档筛选通过 WorkspaceBrowser 暴露的 store actions 驱动（`setArchivedFilter`），并以后备的「视图选项」菜单点击路径兜底。
+- 全局归档可见性由插件接管：开关打开时筛选为 `show`（所有工作区归档会话可见），关闭时筛选为 `default` 并隐藏所有归档行；一帧级 guard 属性保证隐藏从不闪烁。
 
 ## 已知限制
 
 - 已打开但空闲的会话被删除后，Host 内存里的 Session 对象仍会保留到重启（DSH 没有公开的释放接口），但磁盘日志不会重建、侧栏行会立即消失；只有仍停在旧标签页里并继续写入该会话的极端情况可能写入失败。发布版参考实现同样有此限制。
 - 删除正在运行该会话 Agent 的操作会先停止 Agent；若限时内停不下来则整次删除中止（不删任何内容）。
-- 插件开启期间会接管内置归档筛选：全部开关关闭时，「视图选项 → 全部对话（显示已归档）」不再显示归档会话；这是「默认关闭」需求的直接结果。要查看/取消归档某个归档会话，先打开对应工作区的开关。
-- 工作区菜单注入依赖内置菜单的 DOM 结构与本地化标签；DSH 大版本升级后可能需要适配。
+- 插件开启期间会接管内置归档筛选：开关关闭时，「视图选项 → 全部对话（显示已归档）」不再显示归档会话；这是「默认隐藏」需求的直接结果。要看/取消归档某个归档会话，先打开侧栏的归档开关。
+- 侧栏开关行的注入依赖内置面板列表的 DOM 结构（`nav` 面板行 + 本地化标签）；DSH 大版本升级后可能需要适配。
+- 折叠的工作区分组不会渲染其会话行，展开后才能看到该工作区的归档会话。
 
 ## 仓库结构
 
 ```text
-client.js            浏览器端 bundle：删除会话菜单 / 确认弹窗 / 工作区归档开关
+client.js            浏览器端 bundle：删除会话菜单 / 确认弹窗 / 全局归档会话开关
 index.js             Host 入口（转出 src/host/plugin.js）
 src/host/            Host 端：认证路由、会话删除、路径编码
 locale/              插件市场元数据（中/英）
@@ -104,7 +106,7 @@ node smoke.mjs                 # 静态/模块冒烟测试（清单、词典、s
 npm test                       # Host 单元测试（node:test，44 项）
 npm run setup:e2e              # 一次性：准备隔离实例（playwright-core + 会话种子 + profile）
 npm run test:e2e               # 隔离 DSH Web 实例 + Playwright 端到端（11 项：冷/热会话删除、归档显示/隐藏等）
-npm run test:desktop           # 可选：真实 Desktop 外壳（dsh-app://app）7 项检查，缺少打包应用时自动 SKIP
+npm run test:desktop           # 可选：真实 Desktop 外壳（dsh-app://app）9 项检查，缺少打包应用时自动 SKIP
 ```
 
 E2E 使用打包版 DSH 的 CLI 以 Node 身份启动**第二个** Web 实例（私有 `DSH_HOME` 位于
@@ -112,8 +114,8 @@ E2E 使用打包版 DSH 的 CLI 以 Node 身份启动**第二个** Web 实例（
 [docs/dom-recon.md](docs/dom-recon.md) 与 `test/e2e/`。
 
 `npm run test:desktop` 会以**独立 `--user-data-dir` 与独立 `DSH_HOME`** 启动第二个 Desktop
-实例（真正的 `dsh-app://app` 页面），复现/验证「打开过的会话也能删除」和「归档会话按工作区
-显示/隐藏」；它只读用户真实 profile 并复制到 `.tmp-test/`，绝不触碰正在运行的 Desktop 应用。
+实例（真正的 `dsh-app://app` 页面），复现/验证「打开过的会话也能删除」和「侧栏归档开关一次点击
+显示/隐藏全部归档会话」；它只读用户真实 profile 并复制到 `.tmp-test/`，绝不触碰正在运行的 Desktop 应用。
 
 ## 许可证
 

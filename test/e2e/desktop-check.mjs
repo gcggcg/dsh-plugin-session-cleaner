@@ -2,18 +2,21 @@
 /**
  * Optional REAL Desktop-shell checks (`dsh-app://app`) — skippable.
  *
- * The reported failures only happened inside the packaged Electron shell, so
- * these checks boot a SECOND Desktop instance and drive the real sidebar there:
+ * The user reports only happen inside the packaged Electron shell, so these
+ * checks boot a SECOND Desktop instance and drive the real sidebar there:
  *
+ *   - the ONE global "show archived sessions" switch is injected into the
+ *     sidebar panel list directly below 自动化任务 (the old per-workspace folder
+ *     menu toggle is gone). Default OFF hides every archived session and drives
+ *     the built-in archived filter to `default`; ONE click ON shows every
+ *     archived session of every workspace and of the ungrouped bucket and drives
+ *     the filter to `show`; ONE click OFF hides them again; the state survives a
+ *     reload in both directions; manually choosing the built-in
+ *     `全部对话（显示已归档）` view option cannot resurrect them while OFF;
  *   - deletion of a session this process has opened (attached, idle) succeeds,
  *     the row disappears without a reload, and the log directory + projection
- *     cache are removed;
- *   - cold deletion keeps working and also removes the projection cache;
- *   - with the built-in archived filter pre-set to `show` (the reporting user's
- *     persisted state) and every per-workspace toggle off, archived sessions are
- *     driven back to `default`/hidden; enabling a workspace shows only its
- *     archived sessions; disabling hides them again and a reload keeps them
- *     hidden.
+ *     cache are removed; cold deletion keeps working and also removes the
+ *     projection cache.
  *
  * The instance is isolated: its own `--user-data-dir` (`.tmp-test/desktop-userdata`),
  * its own DSH home (`.tmp-test/desktop-home`) and its own CDP port. Only that
@@ -23,6 +26,8 @@
  * Desktop profile or the E2E seed snapshot are unavailable.
  *
  * Usage: node test/e2e/desktop-check.mjs
+ *   (use DSH_E2E_REAL_HOME / DSH_E2E_REAL_PROFILE to point at the real Desktop
+ *   home/profile when it does not live under the OS home directory)
  */
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
@@ -31,6 +36,25 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { ELECTRON, PLUGIN_ROOT, TEMP_ROOT } from './config.mjs';
+import {
+  ARCHIVE_HIDE_LABEL,
+  ARCHIVE_SHOW_LABEL,
+  ARCHIVE_VISIBLE_KEY,
+  LEGACY_ARCHIVE_KEY,
+  archiveToggle,
+  clickArchiveToggle,
+  closeMenu,
+  dismissModals,
+  menuItems,
+  openSessionMenu,
+  openWorkspaceMenu,
+  sessionRows,
+  setArchiveVisible,
+  visibleArchivedKeys,
+  waitForArchiveSwitch,
+  waitForArchivedFilter,
+  waitForArchivedRows,
+} from './browser.mjs';
 import {
   DESKTOP_HOME,
   DESKTOP_LOG,
@@ -44,14 +68,14 @@ import {
   skipWelcome,
   stopDesktop,
 } from './desktop.mjs';
-import { closeMenu, dismissModals, menuItems, openSessionMenu, openWorkspaceMenu, sessionRows } from './browser.mjs';
 
 const REAL_HOME = process.env.DSH_E2E_REAL_HOME ?? join(homedir(), '.dsh');
-const REAL_PROFILE = join(REAL_HOME, 'profiles', 'desktop');
+const REAL_PROFILE = process.env.DSH_E2E_REAL_PROFILE ?? join(REAL_HOME, 'profiles', 'desktop');
 const SEED = join(TEMP_ROOT, 'seed');
-const SHOW_TOGGLE = '显示归档会话';
-const HIDE_TOGGLE = '隐藏归档会话';
 const DELETE = '删除会话';
+const ARCHIVE = '归档会话';
+const UNARCHIVE = '取消归档';
+const VIEW_OPTION_SHOW = '全部对话（显示已归档）';
 
 if (!existsSync(ELECTRON)) {
   console.log(`SKIP: packaged Desktop app not found (${ELECTRON})`);
@@ -174,10 +198,16 @@ function rowSnapshot(page) {
   );
 }
 
-/** Whether an archived row exists and is visibly rendered. */
-function archivedVisible(rows, id) {
-  const row = rows.find((candidate) => candidate.key === `session:${id}`);
-  return row !== undefined && row.visible;
+/** Every session row that exposes an action menu, with its disk state. */
+async function actionableRows(page) {
+  const rows = await rowSnapshot(page);
+  const out = [];
+  for (const row of rows) {
+    if (row.buttons < 1) continue;
+    const id = row.key.slice('session:'.length);
+    out.push({ ...row, id, disk: await diskOf(id) });
+  }
+  return out;
 }
 
 /** The user's persisted sidebar view state, as it was when the bugs were reported. */
@@ -189,27 +219,41 @@ const USER_VIEW_STATE = {
   archivedFilter: 'show',
 };
 
-/** Install the reporting user's persisted state, then reload so the store hydrates. */
-async function seedUserViewState(page) {
+/** Install the reporting user's persisted (stale) state, then reload so the store hydrates. */
+async function seedStaleUserState(page) {
   await page.evaluate(
-    ({ view, plugin }) => {
+    ({ view, legacyKey, newKey }) => {
       localStorage.setItem('dsh.workspace.view.v5', JSON.stringify(view));
-      localStorage.setItem('dsh.session-cleaner.workspace-archived', plugin);
+      localStorage.setItem(legacyKey, '{"enabled":{"legacy-workspace":true},"restoreFilter":"show"}');
+      localStorage.removeItem(newKey);
     },
-    { view: USER_VIEW_STATE, plugin: '{"enabled":{},"restoreFilter":null}' },
+    { view: USER_VIEW_STATE, legacyKey: LEGACY_ARCHIVE_KEY, newKey: ARCHIVE_VISIBLE_KEY },
   );
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
   await waitSidebar(page);
+  await waitForArchiveSwitch(page);
 }
 
-/** Enable/disable one workspace's archived-session toggle. */
-async function setWorkspaceToggle(page, workspaceKey, enabled) {
-  await openWorkspaceMenu(page, workspaceKey);
-  const items = await menuItems(page);
-  const label = enabled ? SHOW_TOGGLE : HIDE_TOGGLE;
-  assert.ok(items?.includes(label), `workspace menu must offer ${label}: ${JSON.stringify(items)}`);
-  await page.locator('[data-menu-material] button[role="menuitem"]', { hasText: label }).first().click({ force: true });
-  await delay(2200);
+/**
+ * Assert the switch rendered the expected state (checked flag, label, storage).
+ * @param page - Playwright page.
+ * @param state - `archiveToggle(page)` result.
+ * @param visible - expected visibility.
+ * @param {{ allowAbsent?: boolean }} [options] - `allowAbsent` accepts an absent
+ *   storage key for the factory-default OFF state (absent already means hidden);
+ *   after any click the state must be persisted as '0'/'1'.
+ */
+async function assertSwitchState(page, state, visible, { allowAbsent = false } = {}) {
+  assert.equal(state.present, true, 'the global archive switch is not injected');
+  assert.equal(state.checked, visible, `switch aria-checked must be ${String(visible)}`);
+  assert.equal(state.label, visible ? ARCHIVE_HIDE_LABEL : ARCHIVE_SHOW_LABEL, 'switch aria-label must name the next action');
+  if (visible) assert.equal(state.stored, '1', `localStorage ${ARCHIVE_VISIBLE_KEY} must be '1' while shown`);
+  else if (allowAbsent && state.stored === null) {
+    // Factory default: no key yet (absent already means hidden). Still never '1'.
+  } else assert.equal(state.stored, '0', `localStorage ${ARCHIVE_VISIBLE_KEY} must be '0' while hidden`);
+  const guard = await page.evaluate(() => document.documentElement.getAttribute('data-session-cleaner-archived-guard'));
+  if (visible) assert.notEqual(guard, 'all', 'the root archived-row guard must be lifted while the switch is ON');
+  else assert.equal(guard, 'all', 'the root archived-row guard must hide archived rows while the switch is OFF');
 }
 
 /** The visible plugin dialog (if any). */
@@ -218,6 +262,30 @@ function readDialog(page) {
     const element = document.querySelector('[role="dialog"], [class*="_modal"]');
     return element === null ? null : { text: (element.innerText ?? '').replace(/\s+/gu, ' ').trim() };
   });
+}
+
+/** Archive one session through the app's built-in row menu. */
+async function archiveViaBuiltin(page, sessionKey) {
+  await openSessionMenu(page, sessionKey);
+  const items = await menuItems(page);
+  assert.ok(items?.some((text) => text.includes(ARCHIVE)), `built-in archive action missing: ${JSON.stringify(items)}`);
+  await page.locator('[data-menu-material] button[role="menuitem"]', { hasText: ARCHIVE }).first().click({ force: true });
+  await delay(1200);
+  const stopAndArchive = page.locator('button', { hasText: '停止并归档' }).first();
+  if ((await stopAndArchive.count()) > 0 && (await stopAndArchive.isVisible())) {
+    await stopAndArchive.click({ force: true });
+    await delay(1400);
+  }
+  await delay(1500);
+}
+
+/** Unarchive one session through the app's built-in row menu (switch must be ON). */
+async function unarchiveViaBuiltin(page, sessionKey) {
+  await openSessionMenu(page, sessionKey);
+  const items = await menuItems(page);
+  assert.ok(items?.some((text) => text.includes(UNARCHIVE)), `built-in unarchive action missing: ${JSON.stringify(items)}`);
+  await page.locator('[data-menu-material] button[role="menuitem"]', { hasText: UNARCHIVE }).first().click({ force: true });
+  await delay(2000);
 }
 
 /**
@@ -239,6 +307,7 @@ async function deleteViaMenu(page, sessionKey) {
 
 let browser;
 let fixtures = [];
+let ungroupedArchivedId = null;
 try {
   await stopDesktop().catch(() => {});
   await buildDesktopHome({ pluginRoot: PLUGIN_ROOT, keepUserData: false });
@@ -269,13 +338,23 @@ try {
   }
   await waitSidebar(page);
 
-  await check('the plugin loads in the real Desktop shell (origin dsh-app://app)', async () => {
+  await check('the plugin loads in the real Desktop shell and injects the switch below 自动化任务', async () => {
     assert.equal(page.url().startsWith(`${DESKTOP_ORIGIN}/`), true, `unexpected page url ${page.url()}`);
     assert.equal(
       await page.evaluate(() => document.querySelector('style[data-plugin="dsh-plugin-session-cleaner"]') !== null),
       true,
       'plugin stylesheet is missing: the client bundle did not load',
     );
+    const state = await waitForArchiveSwitch(page);
+    assert.equal(state.count, 1, `exactly one switch container expected, found ${state.count}`);
+    assert.equal(state.inPanelList, true, 'the switch container must live inside nav[class*="panelList"]');
+    assert.ok(
+      /自动化|Automation|Schedul/iu.test(state.precedingRowLabel ?? ''),
+      `the switch must sit directly below 自动化任务, but the preceding panel row was ${JSON.stringify(state.precedingRowLabel)}`,
+    );
+    assert.equal(state.pillVisible, true, `the switch must render a visible pill (nav width ${String(state.navWidth)}px)`);
+
+    // The old per-workspace folder-menu toggle must be gone.
     const workspaceKeys = await page.evaluate(() =>
       [...document.querySelectorAll('[data-row-key^="workspace:"]')]
         .filter((row) => row.querySelectorAll('button').length >= 2)
@@ -285,60 +364,100 @@ try {
     await openWorkspaceMenu(page, workspaceKeys[0]);
     const items = await menuItems(page);
     await closeMenu(page);
-    assert.ok(items?.includes(SHOW_TOGGLE) || items?.includes(HIDE_TOGGLE), `toggle missing from ${JSON.stringify(items)}`);
-  });
-
-  await seedUserViewState(page);
-  const toggleFixture = fixtures.find((fixture) => fixture.workspaceKey !== 'workspace:') ?? fixtures[0];
-  assert.ok(toggleFixture !== undefined, 'the isolated home must seed at least one archived fixture');
-
-  await check('all toggles off drive the built-in "show" filter back to default and hide archived sessions', async () => {
-    const view = JSON.parse(await page.evaluate(() => localStorage.getItem('dsh.workspace.view.v5') ?? '{}'));
-    assert.equal(view.archivedFilter, 'default', 'the plugin must override the stale built-in "show" filter while every toggle is off');
-    const rows = await rowSnapshot(page);
-    assert.deepEqual(
-      rows.filter((row) => row.archived && row.visible).map((row) => row.key),
-      [],
-      'archived sessions must be hidden while every per-workspace toggle is off',
-    );
-  });
-
-  await check('enabling a workspace shows only its archived sessions and disabling hides them again', async () => {
-    await setWorkspaceToggle(page, toggleFixture.workspaceKey, true);
-    let rows = await rowSnapshot(page);
-    assert.equal(archivedVisible(rows, toggleFixture.id), true, 'the enabled workspace\'s archived session must become visible');
-    for (const other of fixtures.filter((fixture) => fixture.id !== toggleFixture.id)) {
-      assert.equal(archivedVisible(rows, other.id), false, `archived session ${other.id} of another workspace must stay hidden`);
+    assert.ok(items?.includes('重命名') && items?.includes('删除工作区'), `unexpected workspace menu: ${JSON.stringify(items)}`);
+    for (const label of [ARCHIVE_SHOW_LABEL, ARCHIVE_HIDE_LABEL]) {
+      assert.equal(items?.includes(label), false, `the workspace menu must no longer offer ${label}: ${JSON.stringify(items)}`);
     }
-    await setWorkspaceToggle(page, toggleFixture.workspaceKey, false);
-    rows = await rowSnapshot(page);
-    assert.deepEqual(
-      rows.filter((row) => row.archived && row.visible).map((row) => row.key),
-      [],
-      'turning the last toggle off must hide archived sessions again',
-    );
   });
 
-  await check('the archived-visibility state stays hidden after a reload', async () => {
+  await seedStaleUserState(page);
+  assert.ok(fixtures.length >= 2, `the isolated home must seed at least two archived fixtures, found ${fixtures.length}`);
+
+  await check('the archive switch defaults to OFF and hides archived sessions (stale "show" filter overridden)', async () => {
+    const state = await archiveToggle(page);
+    await assertSwitchState(page, state, false, { allowAbsent: true });
+    assert.notEqual(state.legacy, null, 'precondition: the stale legacy per-workspace key must still be present');
+    await waitForArchivedFilter(page, 'default');
+    assert.deepEqual(await visibleArchivedKeys(page), [], 'no archived session may be visible while the switch is OFF');
+  });
+
+  const ungroupedCandidate = (await actionableRows(page)).find(
+    (row) => !row.archived && row.workspaceKey === 'workspace:' && row.disk.dirs.length > 0 && /^session-/u.test(row.id),
+  );
+  if (ungroupedCandidate !== undefined) {
+    await archiveViaBuiltin(page, ungroupedCandidate.key);
+    ungroupedArchivedId = ungroupedCandidate.id;
+    console.log(`note: archived ungrouped fixture ${ungroupedArchivedId} through the built-in menu`);
+  } else {
+    console.log('note: no ungrouped session available; the ON check covers workspace groups only');
+  }
+  const fixtureIds = [...fixtures.map((fixture) => fixture.id), ...(ungroupedArchivedId === null ? [] : [ungroupedArchivedId])];
+
+  await check('ONE click shows archived sessions of every workspace and the ungrouped bucket', async () => {
+    const before = await archiveToggle(page);
+    assert.equal(before.checked, false, 'precondition: the switch must be OFF before the ON click');
+    const after = await clickArchiveToggle(page);
+    await assertSwitchState(page, after, true);
+    assert.equal(after.legacy, null, 'the legacy per-workspace key must be removed once the new state is persisted');
+    await waitForArchivedFilter(page, 'show');
+    const rows = await waitForArchivedRows(page, fixtureIds, true);
+    for (const id of fixtureIds) {
+      const row = rows.find((candidate) => candidate.key === `session:${id}`);
+      assert.ok(row !== undefined, `archived session ${id} is not rendered while the switch is ON`);
+      assert.equal(row.visible, true, `archived session ${id} must be visible while the switch is ON`);
+    }
+  });
+
+  await check('ONE click hides them again and reports the switch unchecked', async () => {
+    const before = await archiveToggle(page);
+    assert.equal(before.checked, true, 'precondition: the switch must be ON before the OFF click');
+    const after = await clickArchiveToggle(page);
+    await assertSwitchState(page, after, false);
+    await waitForArchivedFilter(page, 'default');
+    await waitForArchivedRows(page, fixtureIds, false);
+    assert.deepEqual(await visibleArchivedKeys(page), [], 'no archived session may be visible after the OFF click');
+  });
+
+  await check('manually choosing the built-in "show archived" view option cannot resurrect them', async () => {
+    const trigger = page.locator('button[aria-label="视图选项"], button[aria-label="View options"]').first();
+    await trigger.click({ force: true });
+    await delay(500);
+    await page.locator('[data-menu-material] button[role="menuitem"]', { hasText: VIEW_OPTION_SHOW }).first().click({ force: true });
+    await waitForArchivedFilter(page, 'default');
+    await waitForArchivedRows(page, fixtureIds, false);
+    assert.deepEqual(await visibleArchivedKeys(page), [], 'archived sessions must be re-hidden although the user picked the built-in "show" filter');
+  });
+
+  await check('the switch state persists across reloads (ON stays visible, OFF stays hidden)', async () => {
+    await setArchiveVisible(page, true);
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
     await waitSidebar(page);
-    const rows = await rowSnapshot(page);
-    assert.deepEqual(
-      rows.filter((row) => row.archived && row.visible).map((row) => row.key),
-      [],
-      'archived sessions must stay hidden after a reload with every toggle off',
-    );
+    await waitForArchiveSwitch(page);
+    await waitForArchivedFilter(page, 'show');
+    await waitForArchivedRows(page, fixtureIds, true);
+    let state = await archiveToggle(page);
+    await assertSwitchState(page, state, true);
+
+    await setArchiveVisible(page, false);
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
+    await waitSidebar(page);
+    await waitForArchiveSwitch(page);
+    await waitForArchivedFilter(page, 'default');
+    await waitForArchivedRows(page, fixtureIds, false);
+    state = await archiveToggle(page);
+    await assertSwitchState(page, state, false);
   });
 
+  if (ungroupedArchivedId !== null) {
+    await setArchiveVisible(page, true);
+    await waitForArchivedRows(page, [ungroupedArchivedId], true);
+    await unarchiveViaBuiltin(page, `session:${ungroupedArchivedId}`);
+    await setArchiveVisible(page, false);
+    await waitForArchivedFilter(page, 'default');
+  }
+
   await check('deleting a session this process has opened succeeds without a restart', async () => {
-    const rows = await rowSnapshot(page);
-    const candidates = [];
-    for (const row of rows) {
-      if (row.buttons < 1 || row.archived) continue;
-      const id = row.key.slice('session:'.length);
-      const disk = await diskOf(id);
-      if (disk.dirs.length > 0) candidates.push({ ...row, id, disk });
-    }
+    const candidates = (await actionableRows(page)).filter((row) => !row.archived && row.disk.dirs.length > 0);
     const target = candidates[0];
     assert.ok(target !== undefined, 'no ordinary session available to open and delete');
     await page.locator(`[data-row-key="${target.key}"]`).first().click({ force: true });
@@ -358,14 +477,7 @@ try {
   });
 
   await check('cold deletion keeps working and also removes the projection cache', async () => {
-    const rows = await rowSnapshot(page);
-    const candidates = [];
-    for (const row of rows) {
-      if (row.buttons < 1 || row.archived) continue;
-      const id = row.key.slice('session:'.length);
-      const disk = await diskOf(id);
-      if (disk.dirs.length > 0) candidates.push({ ...row, id, disk });
-    }
+    const candidates = (await actionableRows(page)).filter((row) => !row.archived && row.disk.dirs.length > 0);
     const target = candidates[0];
     assert.ok(target !== undefined, 'no cold session available to delete');
     const dialog = await deleteViaMenu(page, target.key);

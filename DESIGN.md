@@ -26,10 +26,11 @@ One DSH bundle plugin that adds two sidebar features to the DeepSeek Harness Web
 1. **Delete session** — the session row `...` menu (`sidebar.workspaces.session.menu.item`)
    gets a destructive **删除会话** item. Confirming permanently removes the session
    log from disk and all workspace/global bookkeeping, so the row disappears for good.
-2. **Per-workspace archived-session visibility** — the workspace folder row `...` menu
-   (rename / delete workspace) gets a **显示归档会话 / 隐藏归档会话** toggle, default
-   off, persisted per workspace. When on, that workspace's archived sessions are shown
-   in its section of the sidebar session list.
+2. **Global archived-session visibility** — one switch row in the sidebar panel list,
+   directly below 自动化任务: OFF (default) hides every archived session, ON shows every
+   archived session of every workspace (and the ungrouped bucket). This replaced the
+   original per-workspace toggle in the workspace folder row `...` menu, which the user
+   rejected because it needed repeat clicks and per-workspace visits.
 
 DSH target: `>=0.2.1-rc.3 <0.3.0-0` (installed build 0.2.1-rc.3). Node/Electron
 `D:\...\app.asar` internals were researched from the packaged bundles; the summary lives
@@ -143,48 +144,45 @@ The host no longer refuses a session because DSH has it attached; it only refuse
 session's Agent cannot be stopped. The plugin must not crash the host: wrap the whole
 handler; log with `ctx.logger`.
 
-## Feature 2 — client workspace menu (Lead)
+## Feature 2 — global archived visibility switch (Lead)
 
-`dsh-client-ui-workspace` hard-codes its workspace folder menu (`rename`, `delete`) and
-declares no slot for it. There is no supported slot to extend it, so the client half
-augments the DOM:
+The user rejected the first design (a per-workspace toggle injected into the workspace
+folder menu): it required one visit per workspace and clicking it often took several
+attempts. The workspace-menu toggle is **removed**; one global switch in the sidebar panel
+list replaces it.
 
-- Identify workspace `...` triggers by `[data-row-key^="workspace:"]` row + the
-  `aria-label` built from the workspace locale template `actions.workspace.aria`
-  (`ctx.locale.bind('workspace')`), so it stays locale-safe.
-- On trigger click, watch for the portaled menu card (`[data-menu-material]`) and append a
-  React-rendered `MenuItemButton` row (primitives are ModuleLoader baseline externals:
-  `require('@deepseek-ai/dsh-client-ui-primitives')`).
-- Toggle state per workspace id in `localStorage` under
-  `dsh.session-cleaner.workspace-archived` as `{"enabled":{"<workspaceId>":true}}`,
-  default off. (An older `restoreFilter` field is ignored.)
-- Archived visibility is **plugin-owned and deterministic**: `desiredFilter()` is `show`
-  while at least one workspace toggle is on, `default` while every toggle is off. The
-  built-in WorkspaceBrowser filter is driven through the fiber
-  `actions.setArchivedFilter` (localized view-options menu-click fallback), a bounded
-  drift-reassert covers manual view-option picks, and the legacy "restore the detected
-  filter" semantics are gone, so on→off can never re-show archived sessions.
-- Hiding is a plugin-owned stylesheet + row attributes, never an inline style:
-  `[data-session-cleaner-archived-hidden]{display:none !important}` on rows that must be
-  hidden, `data-session-cleaner-archived-shown` on enabled-workspace rows, plus
-  root-level flash guards under `html[data-session-cleaner-archived-guard="all"|"filtered"]`
-  so a newly rendered archived row is hidden before it is classified. React re-renders
-  and remounts therefore cannot resurrect a hidden row.
-- Row/workspace classification uses the DOM section contract
-  (`row.closest('[style*="--dsh-workspace-indent"]')`) with the client `workspaces`
-  registry snapshot (`items[].sessionIds`, `archivedSessionIds`) as fallback for the flat
-  list. Ungrouped (`workspace:''`) archived sessions are always hidden (they have no
-  workspace menu to toggle).
-- A `MutationObserver` on the sidebar watches `childList` and the attributes
-  `style` / `class` / `aria-description` / `data-row-key` (plugin-owned attributes are
-  excluded so tagging cannot retrigger itself) and recomputes the tagging from the
-  enabled set on every tick.
-- Closing the workspace menu after our item is chosen: dispatch an `Escape` keydown on
-  `document` (the Menu primitive listens document-level); fall back to an outside
-  `pointerdown`.
-- Consequence (documented in README): while every plugin toggle is off, the built-in
+- The switch row is injected into the official `sidebar.panellist` nav
+  (`nav[class*="panelList"]`, a list slot) directly after the 自动化任务 panel row:
+  - capture the live panel-row CSS-module class names (row / glyph / title) from an
+    existing row so the injected row matches the surrounding rows in wide and collapsed
+    rails without hard-coding hashed names;
+  - render a `button[role="switch"]` with `aria-checked`, localized aria-label
+    (`archive.show` / `archive.hide`) and a pill switch; marker container
+    `[data-session-cleaner-archive-toggle]`, kept in place by the observer if React
+    re-renders the nav.
+- One global state in `localStorage` under `dsh.session-cleaner.archived-visible`
+  (`'1'` shown, `'0'`/absent hidden, default hidden); the legacy
+  `dsh.session-cleaner.workspace-archived` record is removed on load.
+- Visibility is plugin-owned and deterministic: shown → built-in archived filter driven to
+  `show` (archived sessions of every workspace and the ungrouped bucket render); hidden →
+  driven to `default` **and** every rendered archived row carries
+  `data-session-cleaner-archived-hidden` with
+  `[data-session-cleaner-archived-hidden]{display:none !important}`. A root guard
+  (`html[data-session-cleaner-archived-guard="all"]`) hides archived rows from their first
+  render while the switch is off, so a failed/racy filter drive cannot flash them.
+- The filter is driven through the WorkspaceBrowser fiber actions
+  (`actions.setArchivedFilter`) with the localized view-options menu-click fallback; the
+  persisted `dsh.workspace.view.v5`.archivedFilter is the settle signal, and a bounded
+  re-assert cancels manual view-option picks while the switch is off.
+- One click flips the state and applies it synchronously (guard immediate, filter retried);
+  the switch is the single source of truth, so it cannot inherit a stale detected filter
+  and needs no repeat clicks.
+- A `MutationObserver` watches the sidebar DOM (childList plus `class` / `style` /
+  `aria-description` / `data-row-key` attributes) to re-inject the row, re-apply markers
+  and re-assert the filter; a `ResizeObserver` on the nav toggles the compact (rail) layout.
+- Consequence (documented in README): while the switch is off, the built-in
   "全部对话（显示已归档）" view option is neutralized (archived rows stay hidden). To
-  unarchive an archived session, enable its workspace toggle first.
+  unarchive an archived session, turn the sidebar switch on first.
 
 ## Feature 1 — client side (Lead)
 
@@ -214,14 +212,17 @@ augments the DOM:
 - `node test/e2e/run.mjs` — isolated second DSH Web instance under `.tmp-test/` (separate
   `DSH_HOME`, seed `sessions/` + `storages/workspace.json`, deterministic log-backed
   archived fixtures), Playwright against the printed authenticated URL: 11 checks
-  (attached-session delete incl. projcache removal, archived fixture isolation, stale
-  built-in `archivedFilter:"show"` override, manual "show" cannot resurrect archived rows,
-  per-workspace toggle + reload persistence, host route auth/errors, no page errors).
+  (one global switch injected below 自动化任务, default OFF hides every archived session,
+  ONE click shows every archived session of every workspace + the ungrouped bucket, ONE
+  click hides them again, manual "show archived" cannot resurrect them while OFF, reload
+  persistence, attached-session delete incl. projcache removal, host route auth/errors,
+  no page errors).
 - `node test/e2e/desktop-check.mjs` (optional, skippable) — boots a SECOND packaged
   Desktop instance with its own `--user-data-dir`/`DSH_HOME` and drives the real
-  `dsh-app://app` shell: 7 checks (opened-session delete, cold delete + projcache, archived
-  show/hide with the user's persisted state, bare-uuid id, no page errors). Exits 0 with a
-  SKIP when the packaged app / user's real Desktop profile / seed is unavailable.
+  `dsh-app://app` shell: 9 checks (switch loads below 自动化任务, default OFF, one-click
+  ON/OFF across workspaces + ungrouped, manual view-option override, reload persistence,
+  opened-session delete, cold delete + projcache, no page errors). Exits 0 with a SKIP
+  when the packaged app / user's real Desktop profile / seed is unavailable.
 
 ## Implementation status (final, this build)
 
@@ -235,22 +236,27 @@ augments the DOM:
   Windows (verified: named kernel-semaphore write lock + `FILE_SHARE_DELETE`), and a
   running Agent is cancelled and awaited first (`session/active` if it will not stop,
   with nothing mutated).
-- Feature 2 (per-workspace archived visibility) is implemented and verified:
-  DOM-augmented workspace menu row (between rename and delete), React fiber
-  access to `actions.setArchivedFilter`, deterministic per-workspace show/hide that is
-  re-render safe and treats "all toggles off" as "archived hidden", persisted to
-  `localStorage`, restored after reload.
+- Feature 2 (global archived visibility switch) is implemented and verified: one switch
+  row injected into the official `sidebar.panellist` nav directly below 自动化任务, reusing
+  the live panel-row CSS-module classes; default OFF; ONE click shows every archived
+  session of every workspace (including the ungrouped bucket) and ONE click hides them
+  again; the built-in archived filter is plugin-owned and re-asserted, archived rows are
+  hidden by a CSS + guard mechanism that re-renders cannot wipe; state persists in
+  `localStorage` and survives reload. The old per-workspace menu toggle (which often needed
+  several clicks) is removed.
 - Root causes fixed in this build (reported post-install failures, reproduced in the real
   Desktop shell): (1) the host refused every session DSH had merely opened with
   `session/live` and told the user to restart DSH — now attached-idle sessions are
   deletable and only an unstoppable running Agent refuses; (2) the plugin restored the
   *detected* built-in filter on toggle-off (the reporter's was `show`), so archived
   sessions could never be hidden again, and hiding used inline `style.display` that
-  React re-renders wiped — now the filter is plugin-owned (`show` iff a toggle is on) and
+  React re-renders wiped — now the filter is plugin-owned (`show` iff the switch is on) and
   hiding is an injected CSS rule + row attributes. Cold deletes also left the projection
   cache behind, and the id grammar rejected valid bare-uuid session ids; both fixed.
+  (3) The per-workspace menu toggle was replaced by the single global sidebar switch
+  (0.2.0) after the user reported it needed repeat clicks.
 - Tests (post-fix, all green): `node smoke.mjs` 8/8, `npm test` 44/44,
-  `npm run test:e2e` 11/11, optional `npm run test:desktop` 7/7.
+  `npm run test:e2e` 11/11, optional `npm run test:desktop` 9/9.
 - Recon facts the implementation depends on are recorded in
   `docs/dom-recon.md`; if a future DSH build changes the workspace menu DOM or
   the WorkspaceBrowser props, that file is the first place to update.

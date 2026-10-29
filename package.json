@@ -1,7 +1,7 @@
 {
   "name": "@estelle-ge/dsh-plugin-session-cleaner",
-  "version": "0.1.2",
-  "description": "Session cleanup for the DeepSeek Harness Web sidebar: a destructive Delete session action and a per-workspace archived-session visibility toggle.",
+  "version": "0.2.0",
+  "description": "Session cleanup for the DeepSeek Harness Web sidebar: a destructive Delete session action and one global archived-session visibility switch.",
   "license": "MIT",
   "author": "gcggcg",
   "type": "module",

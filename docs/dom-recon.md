@@ -1,9 +1,19 @@
 # Sidebar DOM reconnaissance (DSH Web 0.2.1-rc.3)
 
 Verified with Playwright against an isolated DSH Web instance (`test/e2e/`). These
-are the browser contracts the plugin relies on, recorded because the workspace
-folder menu has no official extension slot and the archived filter has no public
-client service.
+are the browser contracts the plugin relies on, recorded because the sidebar panel
+list placement and the archived filter have no public client service (the panel list
+does expose an official slot, but a panel entry navigates instead of toggling).
+
+## Sidebar panel list (global switch placement)
+
+| Surface | Selector / fact |
+| --- | --- |
+| Panel list nav | `nav[class*="panelList"]` (`aria-label="全局面板"`), a `list` slot `sidebar.panellist`; rows are `button` elements in slot order (`plugins` forced first, then `order` ascending: 自动化任务 `order: 10`, 更多 launcher last). |
+| Panel row | `button` with class token ending `_panelRow` (min-height 36px, `padding:7px 8px`, `gap:8px`, `margin:0 2px`, hover `--dsw-alias-interactive-bg-hover`); the More launcher has `aria-haspopup="menu"` / `aria-expanded` and is excluded. |
+| Glyph / title spans | First span has class token ending `_panelGlyph` (16/18px icon); wide layout adds a second span ending `_panelTitle`. Both class names are hashed per build, so the plugin captures them from a live row instead of hard-coding. |
+| Collapsed rail | Sidebar root carries a class token ending `_collapsed`; panel rows become 36×36 icon-only buttons. The plugin measures the nav width (`< 90px` = compact) and renders the switch icon-only there. |
+| Injected switch | Container `[data-session-cleaner-archive-toggle]` inserted directly after the 自动化任务 row; it reuses the captured panel-row classes and renders `button[role="switch"]` with `aria-checked` + a pill switch. A `MutationObserver` re-inserts it if React re-renders the nav. |
 
 ## Sidebar session tree
 
@@ -23,7 +33,7 @@ client service.
   `div._material_…` plus `div[role="presentation"]` (the viewport).
 - Workspace folder menu (`items` data rows): viewport children are
   `div._itemWrap_…` wrappers, each with one `button[role="menuitem"]`; text is
-  `重命名` / `删除工作区` in zh.
+  `重命名` / `删除工作区` in zh (the plugin no longer injects a row here).
 - Session row menu (slot component rows): all rows are inside one inner wrapper
   `div` (no class) under the viewport, e.g. `置顶会话`, `重命名`, `分叉会话`,
   `归档会话`, `复制 Session ID`.
@@ -50,7 +60,11 @@ client service.
   'show' | 'only')`; a localized menu-click fallback covers builds where the
   fiber walk fails.
 - The choice is also persisted by the app under `localStorage` key
-  `dsh.workspace.view.v5`; the plugin does not write it directly.
+  `dsh.workspace.view.v5`; the plugin reads it as the settle signal but does not
+  write it directly.
+- Archived-row hiding is plugin-owned CSS: `data-session-cleaner-archived-hidden`
+  (`display:none !important`) plus the root guard
+  `html[data-session-cleaner-archived-guard="all"]` for the first render frame.
 
 ## Deletion / refresh behaviour
 
